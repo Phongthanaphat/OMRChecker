@@ -1,0 +1,62 @@
+{
+  "pageDimensions": [1800, 2400],
+  "bubbleDimensions": [23, 20],
+  "customLabels": {
+    "Roll": ["roll1", "roll2", "roll3", "roll4","roll5","roll6"]
+  },
+  "fieldBlocks": {
+    "Roll": {
+      "origin": [120, 720],
+      "bubblesGap": 70,
+      "labelsGap": 79,
+      "fieldLabels": ["roll1", "roll2", "roll3", "roll4","roll5","roll6"],
+      "fieldType": "QTYPE_INT"
+    },
+    "q01block": {
+      "origin": [780, 735],
+      "bubblesGap": 78,
+      "labelsGap": 70,
+      "fieldLabels": ["q1..10"],
+      "fieldType": "QTYPE_MCQ5"
+    },
+    "q02block": {
+      "origin": [1360, 735],
+      "bubblesGap": 78,
+      "labelsGap": 70,
+      "fieldLabels": ["q11..20"],
+      "fieldType": "QTYPE_MCQ5"
+    },
+    "q03block": {
+      "origin": [195, 1635],
+      "bubblesGap": 78,
+      "labelsGap": 70,
+      "fieldLabels": ["q21..30"],
+      "fieldType": "QTYPE_MCQ5"
+    },
+    "q04block": {
+      "origin": [780, 1635],
+      "bubblesGap": 78,
+      "labelsGap": 70,
+      "fieldLabels": ["q31..40"],
+      "fieldType": "QTYPE_MCQ5"
+    },
+    "q05block": {
+      "origin": [1360, 1635],
+      "bubblesGap": 78,
+      "labelsGap": 70,
+      "fieldLabels": ["q41..50"],
+      "fieldType": "QTYPE_MCQ5"
+    }
+  },
+  "preProcessors": [
+    {
+      "name": "CropOnMarkers",
+      "options": {
+        "relativePath": "omr_marker.jpg",
+        "sheetToMarkerWidthRatio": 17,
+        "min_matching_threshold": 0.45,
+        "max_matching_variation": 0.40
+      }
+    }
+  ]
+}
