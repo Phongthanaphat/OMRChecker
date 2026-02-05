@@ -40,6 +40,17 @@ cd OMRChecker
 
 ### 3.2 สร้าง Python venv และติดตั้ง dependencies
 
+บน Debian/Ubuntu ถ้าสร้าง venv แล้ว error เรื่อง `ensurepip is not available` ให้ติดตั้งแพ็กเกจก่อน:
+
+```bash
+# ดูเวอร์ชัน Python (เช่น 3.10, 3.11) แล้วติดตั้งให้ตรง
+python3 --version
+sudo apt update
+sudo apt install python3.10-venv   # หรือ python3.11-venv ตามเวอร์ชัน
+```
+
+จากนั้นสร้าง venv และติดตั้ง dependencies:
+
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
