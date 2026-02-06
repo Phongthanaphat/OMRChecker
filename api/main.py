@@ -45,6 +45,9 @@ app = _App(
     title="OMR Checker API",
     description="Upload OMR sheet image, get responses and score as JSON.",
     version="1.0.0",
+    docs_url="/docs",
+    openapi_url="/openapi.json",
+    root_path="/ai"
 )
 
 # CORS: allow Laravel / browser to GET images (e.g. img src to checked_omr_path)
