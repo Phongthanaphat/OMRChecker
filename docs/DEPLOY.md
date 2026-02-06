@@ -224,3 +224,13 @@ sudo nginx -t && sudo systemctl reload nginx
 - **Template cache** ทำงานอัตโนมัติ ไม่ต้องตั้งค่าเพิ่ม
 
 รายละเอียด API (endpoints, body, response) ดูใน [API.md](API.md)
+
+---
+
+## 10. Optimize ระดับโค้ด (มีอยู่แล้ว)
+
+- **Template cache** — โหลด template/config/marker ครั้งแรกแล้ว cache ใน memory ต่อ request
+- **ไม่เรียก get_template_dir ซ้ำ** — เมื่อ cache miss ส่ง template_dir ที่มีอยู่แล้วเข้า cache getter
+- **ข้าม config table** — เมื่อเรียกจาก API ไม่พิมพ์ Rich table (เร็วขึ้น น้อย log)
+- **Gamma LUT cache** — ตาราง adjust_gamma แคชต่อค่า gamma (ใช้ค่าเดิมซ้ำ ไม่สร้าง array ใหม่ทุกครั้ง)
+- **Log สั้นลง** — API และ entry ไม่ log payload/evaluation รายละเอียดทุกบรรทัด (ลด I/O)

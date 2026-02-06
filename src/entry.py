@@ -146,15 +146,16 @@ def process_dir(
         setup_dirs_for_paths(paths)
         outputs_namespace = setup_outputs_for_template(paths, template)
 
-        print_config_summary(
-            curr_dir,
-            omr_files,
-            template,
-            tuning_config,
-            local_config_path,
-            evaluation_config,
-            args,
-        )
+        if not args.get("skip_config_table"):
+            print_config_summary(
+                curr_dir,
+                omr_files,
+                template,
+                tuning_config,
+                local_config_path,
+                evaluation_config,
+                args,
+            )
         if args["setLayout"]:
             show_template_layouts(omr_files, template, tuning_config)
         else:
@@ -277,7 +278,8 @@ def process_files(
             evaluation_config is None
             or not evaluation_config.get_should_explain_scoring()
         ):
-            logger.info(f"Read Response: \n{omr_response}")
+            logger.info(f"Read Response: {file_id} ({len(omr_response)} keys)")
+            logger.debug("Read Response full: %s", omr_response)
 
         score = 0
         if evaluation_config is not None:

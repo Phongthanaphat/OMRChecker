@@ -14,6 +14,9 @@ from src.logger import logger
 # matplotlib imported lazily only when saving/showing images (show_image_level >= 1)
 CLAHE_HELPER = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
 
+# Cache gamma LUTs to avoid rebuilding the same table every frame (same gamma used repeatedly)
+_gamma_lut_cache: dict[float, np.ndarray] = {}
+
 
 class ImageUtils:
     """A Static-only Class to hold common image processing utilities & wrappers over OpenCV functions"""
@@ -86,15 +89,15 @@ class ImageUtils:
 
     @staticmethod
     def adjust_gamma(image, gamma=1.0):
-        # build a lookup table mapping the pixel values [0, 255] to
-        # their adjusted gamma values
-        inv_gamma = 1.0 / gamma
-        table = np.array(
-            [((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]
-        ).astype("uint8")
-
-        # apply gamma correction using the lookup table
-        return cv2.LUT(image, table)
+        # build a lookup table (cached per gamma) mapping [0, 255] to adjusted values
+        global _gamma_lut_cache
+        if gamma not in _gamma_lut_cache:
+            inv_gamma = 1.0 / gamma
+            _gamma_lut_cache[gamma] = np.array(
+                [((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)],
+                dtype="uint8",
+            )
+        return cv2.LUT(image, _gamma_lut_cache[gamma])
 
     @staticmethod
     def four_point_transform(image, pts):

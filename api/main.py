@@ -107,11 +107,12 @@ def get_template_dir(template_id: str) -> Path:
     return path
 
 
-def _get_cached_template_files(template_id: str) -> dict[str, bytes]:
+def _get_cached_template_files(template_id: str, template_dir: Path | None = None) -> dict[str, bytes]:
     """Load template.json, config.json, omr_marker.jpg into memory; cache per template_id."""
     if template_id in _template_file_cache:
         return _template_file_cache[template_id]
-    template_dir = get_template_dir(template_id)
+    if template_dir is None:
+        template_dir = get_template_dir(template_id)
     out: dict[str, bytes] = {}
     for name in ("template.json", "config.json", "omr_marker.jpg"):
         src = template_dir / name
@@ -178,17 +179,13 @@ async def check_omr(
         scans_dir = work_dir / "scans"
         scans_dir.mkdir(exist_ok=True)
 
-        # Write template files from cache (ลด disk I/O ต่อ request)
-        cached = _get_cached_template_files(template_id)
+        # Write template files from cache (avoid second get_template_dir on cache miss)
+        cached = _get_cached_template_files(template_id, template_dir)
         for name, data in cached.items():
             (work_dir / name).write_bytes(data)
 
         # Evaluation: from Laravel JSON (priority) or from template
         evaluation_sent = evaluation is not None and evaluation.strip()
-        logger.info(
-            "[API] evaluation param: %s (length=%s)"
-            % ("sent" if evaluation_sent else "not sent", len(evaluation) if evaluation else 0)
-        )
         if evaluation_sent and evaluation is not None:
             try:
                 eval_data = json.loads(evaluation.strip())
@@ -197,16 +194,8 @@ async def check_omr(
                     status_code=400,
                     detail=f"Invalid evaluation JSON: {e!s}",
                 ) from e
-            # Log payload structure to help debug answerKeyPayload issues
             opts = eval_data.get("options") if isinstance(eval_data.get("options"), dict) else {}
             q_order = opts.get("questions_in_order")
-            logger.info(
-                "[API] evaluation payload: top_keys=%s options_type=%s questions_in_order_type=%s questions_in_order_len=%s",
-                list(eval_data.keys()),
-                type(opts).__name__,
-                type(q_order).__name__ if q_order is not None else "None",
-                len(q_order) if isinstance(q_order, list) else "N/A",
-            )
             if not isinstance(q_order, list):
                 raise HTTPException(
                     status_code=400,
@@ -224,25 +213,11 @@ async def check_omr(
                 json.dumps(eval_data, ensure_ascii=False),
                 encoding="utf-8",
             )
-            logger.info(
-                "[API] evaluation.json written from request (questions_in_order sample: %s)",
-                q_order[:3] if len(q_order) else [],
-            )
         elif evaluate:
             src = template_dir / "evaluation.json"
             if src.exists():
                 shutil.copy2(src, work_dir / "evaluation.json")
-                logger.info("[API] evaluation.json copied from template")
-            else:
-                logger.info("[API] evaluate=True but no evaluation.json in template")
-        else:
-            logger.info("[API] evaluate=False, no evaluation used")
-
         has_evaluation = (work_dir / "evaluation.json").exists()
-        logger.info(
-            "[API] has_evaluation=%s (will draw green/red circles: %s)"
-            % (has_evaluation, has_evaluation)
-        )
 
         # Save uploaded image (with size limit to avoid memory/CPU abuse)
         upload_path = scans_dir / f"upload{ext}"
@@ -261,21 +236,6 @@ async def check_omr(
             chunks.append(chunk)
         content = b"".join(chunks)
         upload_path.write_bytes(content)
-        logger.info(
-            "[API] image saved: filename=%s size_bytes=%s",
-            upload_path.name,
-            len(content),
-        )
-        # Log image dimensions to help debug processing issues (e.g. bad dimensions)
-        try:
-            import cv2
-            img_check = cv2.imread(str(upload_path), cv2.IMREAD_GRAYSCALE)
-            if img_check is not None:
-                logger.info("[API] image dimensions: shape=%s", img_check.shape)
-            else:
-                logger.warning("[API] image could not be read by OpenCV (invalid or corrupt?)")
-        except Exception as e:
-            logger.warning("[API] image dimension check failed: %s", e)
 
         # Run OMR in-process (no subprocess = much faster, no Python startup per request)
         from src.entry import entry_point
@@ -285,6 +245,7 @@ async def check_omr(
             "debug": True,
             "setLayout": False,
             "autoAlign": False,
+            "skip_config_table": True,  # skip Rich table when called from API (faster, less log noise)
         }
         entry_point(Path(work_dir), omr_args)
 
