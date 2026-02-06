@@ -124,9 +124,15 @@ def _get_cached_template_files(template_id: str) -> dict[str, bytes]:
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc):
     """Return JSON with error message for any uncaught exception (e.g. timeout)."""
+    logger.exception("OMR API 500: %s", exc)
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "type": type(exc).__name__},
+        content={
+            "detail": str(exc),
+            "type": type(exc).__name__,
+            "source": "omr-api",  # ใช้แยกว่า 500 มาจาก OMR API ไม่ใช่ Laravel
+        },
+        headers={"X-OMR-API-Error": "1"},
     )
 
 
