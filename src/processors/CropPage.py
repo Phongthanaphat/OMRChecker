@@ -31,7 +31,7 @@ def check_max_cosine(approx):
     max_cosine = 0
     min_cosine = 1.5
     for i in range(2, 5):
-        cosine = abs(angle(approx[i % 4], approx[i - 2], approx[i - 1]))
+        cosine = abs(float(angle(approx[i % 4], approx[i - 2], approx[i - 1])))
         max_cosine = max(cosine, max_cosine)
         min_cosine = min(cosine, min_cosine)
 

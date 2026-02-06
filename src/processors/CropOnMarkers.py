@@ -20,6 +20,7 @@ from src.logger import logger
 from src.processors.interfaces.ImagePreprocessor import ImagePreprocessor
 from src.utils.image import ImageUtils
 from src.utils.interaction import InteractionUtils
+from src.utils.numeric import to_scalar
 
 
 class CropOnMarkers(ImagePreprocessor):
@@ -103,7 +104,7 @@ class CropOnMarkers(ImagePreprocessor):
             quarter_match_log += f"Quarter{str(k + 1)}: {str(round(max_t, 3))}\t"
             if (
                 max_t < self.min_matching_threshold
-                or abs(all_max_t - max_t) >= self.max_matching_variation
+                or abs(to_scalar(all_max_t) - to_scalar(max_t)) >= self.max_matching_variation
             ):
                 logger.error(
                     file_path,

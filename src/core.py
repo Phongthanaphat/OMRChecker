@@ -18,6 +18,7 @@ from src.constants.common import (
 from src.logger import logger
 from src.utils.image import CLAHE_HELPER, ImageUtils
 from src.utils.interaction import InteractionUtils
+from src.utils.numeric import to_scalar
 
 
 class ImageInstanceOps:
@@ -620,6 +621,8 @@ class ImageInstanceOps:
             if jump > max1:
                 max1 = jump
                 thr1 = q_vals[i - ls] + jump / 2
+        max1 = to_scalar(max1)
+        thr1 = to_scalar(thr1)
 
         # NOTE: thr2 is deprecated, thus is JUMP_DELTA
         # Make use of the fact that the JUMP_DELTA(Vertical gap ofc) between
@@ -629,9 +632,11 @@ class ImageInstanceOps:
         for i in range(ls, l):
             jump = q_vals[i + ls] - q_vals[i - ls]
             new_thr = q_vals[i - ls] + jump / 2
-            if jump > max2 and abs(thr1 - new_thr) > JUMP_DELTA:
+            if jump > max2 and abs(to_scalar(thr1) - to_scalar(new_thr)) > JUMP_DELTA:
                 max2 = jump
                 thr2 = new_thr
+        max2 = to_scalar(max2)
+        thr2 = to_scalar(thr2)
         # global_thr = min(thr1,thr2)
         global_thr, j_low, j_high = thr1, thr1 - max1 // 2, thr1 + max1 // 2
 
@@ -768,7 +773,7 @@ class ImageInstanceOps:
             # appendSaveImg(6,getPlotImg())
             if plot_show:
                 plt.show()
-        return thr1
+        return to_scalar(thr1)
 
     def append_save_img(self, key, img):
         if self.save_image_level >= int(key):

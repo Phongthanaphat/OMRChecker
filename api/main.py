@@ -197,6 +197,21 @@ async def check_omr(
                     status_code=400,
                     detail=f"Invalid evaluation JSON: {e!s}",
                 ) from e
+            # Log payload structure to help debug answerKeyPayload issues
+            opts = eval_data.get("options") if isinstance(eval_data.get("options"), dict) else {}
+            q_order = opts.get("questions_in_order")
+            logger.info(
+                "[API] evaluation payload: top_keys=%s options_type=%s questions_in_order_type=%s questions_in_order_len=%s",
+                list(eval_data.keys()),
+                type(opts).__name__,
+                type(q_order).__name__ if q_order is not None else "None",
+                len(q_order) if isinstance(q_order, list) else "N/A",
+            )
+            if not isinstance(q_order, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="evaluation.options.questions_in_order must be a list (array). Check answerKeyPayload structure from Laravel.",
+                )
             try:
                 from src.utils.validations import validate_evaluation_json
                 validate_evaluation_json(eval_data, "evaluation (request body)")
@@ -210,8 +225,8 @@ async def check_omr(
                 encoding="utf-8",
             )
             logger.info(
-                "[API] evaluation.json written from request (questions_in_order: %s)"
-                % (eval_data.get("options", {}).get("questions_in_order", [])[:3],)
+                "[API] evaluation.json written from request (questions_in_order sample: %s)",
+                q_order[:3] if len(q_order) else [],
             )
         elif evaluate:
             src = template_dir / "evaluation.json"
@@ -246,6 +261,21 @@ async def check_omr(
             chunks.append(chunk)
         content = b"".join(chunks)
         upload_path.write_bytes(content)
+        logger.info(
+            "[API] image saved: filename=%s size_bytes=%s",
+            upload_path.name,
+            len(content),
+        )
+        # Log image dimensions to help debug processing issues (e.g. bad dimensions)
+        try:
+            import cv2
+            img_check = cv2.imread(str(upload_path), cv2.IMREAD_GRAYSCALE)
+            if img_check is not None:
+                logger.info("[API] image dimensions: shape=%s", img_check.shape)
+            else:
+                logger.warning("[API] image could not be read by OpenCV (invalid or corrupt?)")
+        except Exception as e:
+            logger.warning("[API] image dimension check failed: %s", e)
 
         # Run OMR in-process (no subprocess = much faster, no Python startup per request)
         from src.entry import entry_point
