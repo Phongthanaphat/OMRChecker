@@ -16,11 +16,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-try:
-    from fastapi_offline import FastAPIOffline
-    _App = FastAPIOffline  # /docs ใช้ Swagger UI จาก local (ทำงานได้ตอนไม่มีเน็ต)
-except ImportError:
-    _App = FastAPI  # fallback: ใช้ FastAPI ปกติ (/docs ต้องมีเน็ตโหลด CDN)
+_App = FastAPI
 
 # Project root (parent of api/) – ensure importable when running as uvicorn api.main:app
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +45,7 @@ app = _App(
     openapi_url="/openapi.json",
     root_path="/ai"
 )
+
 
 # CORS: allow Laravel / browser to GET images (e.g. img src to checked_omr_path)
 app.add_middleware(
