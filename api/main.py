@@ -5,6 +5,9 @@ Runs OMR in-process (no subprocess) for faster response.
 """
 import glob
 import json
+import os
+import re
+import secrets
 import shutil
 import tempfile
 import uuid
@@ -12,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd  # pyright: ignore[reportMissingImports]
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -26,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 
 from src.logger import logger
-DEFAULT_TEMPLATE_ID = "default"
+DEFAULT_TEMPLATE_ID = "50q"
 
 # Max upload size (20 MB) – reject larger to avoid memory/CPU abuse
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -37,13 +40,64 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 # Cache template files (template.json, config.json, omr_marker.jpg) per template_id to reduce disk I/O
 _template_file_cache: dict[str, dict[str, bytes]] = {}
 
+# Internal API key for sensitive operations (DELETE endpoints).
+# Set via OMR_INTERNAL_API_KEY env var. If empty, auth is disabled (dev mode only — DO NOT use in production with public Nginx).
+INTERNAL_API_KEY = os.getenv("OMR_INTERNAL_API_KEY", "").strip()
+
+# Pattern for school_id / exam_id: alphanumeric + dash + underscore, 1-64 chars.
+# Strict to prevent path traversal (no "..", "/", "\") and keep folder names sane.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_id(value: str | None, name: str, *, required: bool = False) -> str | None:
+    """Validate school_id / exam_id. Return cleaned value or None.
+
+    Raises HTTPException(400) if invalid (or empty when required=True).
+    """
+    if value is None or value == "":
+        if required:
+            raise HTTPException(status_code=400, detail=f"{name} is required")
+        return None
+    if not _SAFE_ID_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {name}: must be 1-64 chars, alphanumeric/dash/underscore only",
+        )
+    return value
+
+
+def _verify_internal_key(authorization: str | None = Header(None)) -> None:
+    """Verify Authorization: Bearer <OMR_INTERNAL_API_KEY> header for sensitive endpoints.
+
+    If OMR_INTERNAL_API_KEY env var is empty → auth is disabled (dev mode).
+    Use secrets.compare_digest to avoid timing attacks.
+    """
+    if not INTERNAL_API_KEY:
+        return  # Dev mode — no key configured
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header (expected: 'Bearer <key>')")
+    token = authorization[len("Bearer "):]
+    if not secrets.compare_digest(token, INTERNAL_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _resolve_within_checked_dir(*parts: str) -> Path:
+    """Resolve a subpath under CHECKED_OMR_DIR, raising 400 if path escapes the dir."""
+    base = CHECKED_OMR_DIR.resolve()
+    target = (CHECKED_OMR_DIR.joinpath(*parts)).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid path") from e
+    return target
+
 app = _App(
     title="OMR Checker API",
     description="Upload OMR sheet image, get responses and score as JSON.",
     version="1.0.0",
     docs_url="/docs",
     openapi_url="/openapi.json",
-    root_path="/ai"
+    root_path="/api/omr"
 )
 
 
@@ -52,9 +106,54 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# Paths that bypass the global auth middleware. Keep this list small.
+# - /health: needed by systemd / load balancer health checks (no secrets exposed)
+# - /docs, /redoc, /openapi.json: API documentation (consider protecting in production
+#   if you don't want public schema discovery — but they don't expose data without auth)
+_AUTH_BYPASS_PATHS: set[str] = {"/health"}
+_AUTH_BYPASS_PREFIXES: tuple[str, ...] = ("/docs", "/redoc", "/openapi.json")
+
+
+@app.middleware("http")
+async def global_auth_middleware(request: Request, call_next):
+    """Require Authorization: Bearer <OMR_INTERNAL_API_KEY> on every request.
+
+    Behaviors:
+    - If OMR_INTERNAL_API_KEY env var is empty → middleware is disabled (dev mode).
+    - CORS preflight (OPTIONS) is always allowed.
+    - Whitelisted paths (see _AUTH_BYPASS_*) skip auth.
+    - All other paths must include `Authorization: Bearer <key>` matching INTERNAL_API_KEY.
+    """
+    if not INTERNAL_API_KEY:
+        return await call_next(request)
+
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    path = request.url.path
+    if path in _AUTH_BYPASS_PATHS or path.startswith(_AUTH_BYPASS_PREFIXES):
+        return await call_next(request)
+
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid Authorization header (expected: 'Bearer <key>')"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = auth[len("Bearer "):]
+    if not secrets.compare_digest(token, INTERNAL_API_KEY):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid API key"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 CHECKED_OMR_DIR = OUTPUTS_DIR / "scans" / "CheckedOMRs"
@@ -153,12 +252,15 @@ async def check_omr(
     template_id: str = DEFAULT_TEMPLATE_ID,
     evaluate: bool = True,
     evaluation: str | None = Form(None, description="Evaluation config as JSON (from Laravel). If provided, overrides template evaluation and enables scoring."),
+    school_id: str | None = Form(None, description="School identifier (optional). Used to organize Checked OMR files: CheckedOMRs/<school_id>/<exam_id>/<YYYY-MM>/<file>"),
+    exam_id: str | None = Form(None, description="Exam identifier (optional). Used together with school_id to group files by exam (enables targeted cleanup via DELETE /exam/{school_id}/{exam_id})."),
 ):
     """
     Upload an OMR sheet image. Returns responses (Roll, q1, q2, ...).
     - evaluation (optional): JSON string of evaluation config from Laravel. If sent, OMR will use it to compute score and return score + evaluation.
     - If evaluate=true and no evaluation JSON: use template's evaluation.json if present.
     - If evaluate=false and no evaluation JSON: raw responses only; Laravel can compute score.
+    - school_id / exam_id (optional): organize Checked OMR files into per-school/per-exam folders for targeted cleanup.
     """
     if not image.filename:
         raise HTTPException(status_code=400, detail="No filename")
@@ -168,6 +270,10 @@ async def check_omr(
             status_code=400,
             detail="File must be .jpg, .jpeg or .png",
         )
+
+    # Validate school_id / exam_id (optional, but if provided must be safe)
+    school_id = _safe_id(school_id, "school_id")
+    exam_id = _safe_id(exam_id, "exam_id")
 
     template_dir = get_template_dir(template_id)
     request_id = str(uuid.uuid4())
@@ -286,12 +392,24 @@ async def check_omr(
                 except Exception:
                     pass
 
-        # Copy checked OMR image to persistent folder (แยกโฟลเดอร์ตามเดือน: CheckedOMRs/YYYY-MM/)
+        # Copy checked OMR image to persistent folder.
+        # Path layout (path A): CheckedOMRs/<school_id>/<exam_id>/<YYYY-MM>/<file>
+        #   - With school_id+exam_id: full per-school/per-exam grouping (enables DELETE /exam/<school>/<exam> cleanup)
+        #   - With only school_id: CheckedOMRs/<school_id>/<YYYY-MM>/<file>
+        #   - Without either: CheckedOMRs/<YYYY-MM>/<file>  (legacy / backward compatible)
         checked_omr_path = None
         checked_omr_filename = None
         checked_src = out_dir / "scans" / "CheckedOMRs" / file_id
-        month_folder = datetime.now().strftime("%Y-%m")  # e.g. 2025-02
-        persistent_checked_dir = PROJECT_ROOT / "outputs" / "scans" / "CheckedOMRs" / month_folder
+        month_folder = datetime.now().strftime("%Y-%m")  # e.g. 2026-04
+
+        sub_parts: list[str] = []
+        if school_id:
+            sub_parts.append(school_id)
+        if exam_id:
+            sub_parts.append(exam_id)
+        sub_parts.append(month_folder)
+
+        persistent_checked_dir = CHECKED_OMR_DIR.joinpath(*sub_parts)
         if checked_src.exists():
             persistent_checked_dir.mkdir(parents=True, exist_ok=True)
             safe_name = f"{request_id}_{Path(image.filename or 'upload').name}"
@@ -299,8 +417,8 @@ async def check_omr(
             try:
                 shutil.copy2(checked_src, persistent_dest)
                 checked_omr_path = str(persistent_dest.relative_to(PROJECT_ROOT))
-                # สำหรับโหลดรูปใช้ path จาก CheckedOMRs: YYYY-MM/filename
-                checked_omr_filename = f"{month_folder}/{safe_name}"
+                # subpath under CheckedOMRs/ — used by /checked/{file_path:path}
+                checked_omr_filename = "/".join([*sub_parts, safe_name])
             except OSError:
                 pass
 
@@ -329,3 +447,67 @@ async def check_omr(
                     shutil.rmtree(d)
                 except OSError:
                     pass
+
+
+def _count_files(path: Path) -> int:
+    """Count files (recursively) under path. Returns 0 if path does not exist."""
+    if not path.exists():
+        return 0
+    return sum(1 for p in path.rglob("*") if p.is_file())
+
+
+@app.delete("/exam/{school_id}/{exam_id}")
+async def delete_exam(school_id: str, exam_id: str):
+    """
+    Delete all Checked OMR files for a school's exam (use when exam is deleted in Laravel).
+
+    Removes: outputs/scans/CheckedOMRs/<school_id>/<exam_id>/  (all months under it)
+    Auth: handled by global_auth_middleware (Authorization: Bearer <OMR_INTERNAL_API_KEY>)
+    """
+    school_id = _safe_id(school_id, "school_id", required=True) or ""
+    exam_id = _safe_id(exam_id, "exam_id", required=True) or ""
+
+    target = _resolve_within_checked_dir(school_id, exam_id)
+    if not target.exists() or not target.is_dir():
+        return {"deleted": False, "message": "Exam folder not found", "path": f"{school_id}/{exam_id}"}
+
+    files_removed = _count_files(target)
+    try:
+        shutil.rmtree(target)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {e!s}") from e
+
+    logger.info("Deleted exam files: %s/%s (%d files)", school_id, exam_id, files_removed)
+    return {
+        "deleted": True,
+        "path": f"{school_id}/{exam_id}",
+        "files_removed": files_removed,
+    }
+
+
+@app.delete("/school/{school_id}")
+async def delete_school(school_id: str):
+    """
+    Delete ALL Checked OMR files for a school (use with caution — when a school is removed/migrated).
+
+    Removes: outputs/scans/CheckedOMRs/<school_id>/  (all exams + months under it)
+    Auth: handled by global_auth_middleware (Authorization: Bearer <OMR_INTERNAL_API_KEY>)
+    """
+    school_id = _safe_id(school_id, "school_id", required=True) or ""
+
+    target = _resolve_within_checked_dir(school_id)
+    if not target.exists() or not target.is_dir():
+        return {"deleted": False, "message": "School folder not found", "path": school_id}
+
+    files_removed = _count_files(target)
+    try:
+        shutil.rmtree(target)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {e!s}") from e
+
+    logger.info("Deleted school files: %s (%d files)", school_id, files_removed)
+    return {
+        "deleted": True,
+        "path": school_id,
+        "files_removed": files_removed,
+    }

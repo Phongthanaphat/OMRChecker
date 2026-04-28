@@ -9,7 +9,7 @@
     "show_image_level": 0
   },
   "evaluation_overlay": {
-    "circle_radius_ratio": 2.0,
-    "circle_thickness": 3
+    "circle_radius_ratio": 1.25,
+    "circle_thickness": 6
   }
 }

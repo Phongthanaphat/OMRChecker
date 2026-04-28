@@ -62,11 +62,16 @@ python3 -m venv venv
 ### 3.3 ตรวจสอบเทมเพลต
 
 ```bash
-ls templates/default/
-# ต้องมี: template.json, config.json, omr_marker.jpg
+ls templates/
+# ควรเห็นโฟลเดอร์เทมเพลตแต่ละแบบ เช่น 20q, 30q, 50q
+
+ls templates/50q/
+# แต่ละโฟลเดอร์ต้องมี: template.json, config.json, omr_marker.jpg
 ```
 
 ถ้าส่ง evaluation จาก Laravel ไม่ต้องมี `evaluation.json` ในเทมเพลต
+
+> **หมายเหตุ:** API ใช้ `templates/50q/` เป็น default fallback (ตั้งใน `DEFAULT_TEMPLATE_ID` ใน `api/main.py`) — ถ้าต้องการเปลี่ยน fallback ไปใช้เทมเพลตอื่นแก้ค่านี้แล้ว restart service
 
 ### 3.4 ทดสอบรัน (ไม่ใช้ systemd)
 
@@ -107,11 +112,18 @@ sudo nano /etc/systemd/system/omr-checker-api.service
 ตัวอย่าง ExecStart ที่ใช้แล้ว (พร้อม optimize):
 
 ```ini
+Environment="OMR_INTERNAL_API_KEY=REPLACE_WITH_RANDOM_KEY"
 ExecStart=/var/www/OMRChecker/venv/bin/python3 run_api.py --host 127.0.0.1 --port 8080 --workers 4
 ```
 
 - **`--host 127.0.0.1`** — ให้เฉพาะ Laravel บน VPS เรียกได้ (ไม่เปิด port 8080 ออกนอก)
 - **`--workers 4`** — 4 งานพร้อมกัน (ปรับตามจำนวน CPU ได้ เช่น 2 หรือ 6)
+- **`OMR_INTERNAL_API_KEY`** — Global API key สำหรับ **ทุก endpoint** (ยกเว้น `/health`, `/docs`, `/redoc`, `/openapi.json`)
+  - **บังคับใส่ถ้าเปิด API ออก public ผ่าน Nginx** (เช่น `location /api/omr/ { proxy_pass ...; }`) ไม่งั้นใครก็เรียก API ได้
+  - สุ่ม key ด้วย `openssl rand -hex 32` (output 64 hex chars)
+  - ค่าเดียวกันต้องไปใส่ใน Laravel `.env` → `OMR_INTERNAL_API_KEY=...`
+  - ถ้าไม่ตั้งค่า env var → middleware **ปิดอัตโนมัติ** (dev local mode — ห้ามใช้บน production)
+  - Client ทุกตัวต้องส่ง header `Authorization: Bearer <key>` ในทุก request (รวมถึง POST /check และ GET /checked/...)
 
 ### 4.2 เปิดใช้และสตาร์ท
 

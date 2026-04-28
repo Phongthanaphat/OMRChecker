@@ -10,7 +10,8 @@ Backend API สำหรับตรวจข้อสอบ OMR รันบน
 
 ## โครงสร้างโฟลเดอร์มาตรฐาน
 
-- **templates/default/** – เทมเพลตหลัก (template.json, config.json, omr_marker.jpg; evaluation.json ถ้าต้องการให้คิดคะแนนจากเทมเพลต หรือส่ง evaluation เป็น JSON จาก Laravel แทน)
+- **templates/{template_id}/** – เทมเพลตแต่ละแบบ (เช่น `templates/20q/`, `templates/30q/`, `templates/50q/`) แต่ละโฟลเดอร์ต้องมี `template.json`, `config.json`, `omr_marker.jpg`; เพิ่ม `evaluation.json` ได้ถ้าต้องการให้คิดคะแนนจากเทมเพลต หรือส่ง `evaluation` เป็น JSON จาก Laravel แทน
+- **Default fallback:** ถ้า request ไม่ส่ง `template_id` API จะใช้ `templates/50q/` (ตั้งค่าใน `DEFAULT_TEMPLATE_ID` ใน `api/main.py`)
 
 ## ติดตั้งและรัน API
 
@@ -80,36 +81,86 @@ sudo nginx -t && sudo systemctl reload nginx
 - `sudo systemctl restart omr-checker-api` — restart หลังอัปเดตโค้ด
 - `sudo journalctl -u omr-checker-api -f` — ดู log
 
+## Authentication (Global API Key)
+
+ทุก endpoint **ต้องส่ง** header
+
+```
+Authorization: Bearer <OMR_INTERNAL_API_KEY>
+```
+
+**ยกเว้น** path เหล่านี้ที่ไม่ต้องใช้ key (whitelist)
+
+- `/health` — สำหรับ systemd / monitoring
+- `/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect` — Swagger / ReDoc UI
+- HTTP `OPTIONS` request (CORS preflight)
+
+ถ้า env var `OMR_INTERNAL_API_KEY` **ไม่ถูกตั้งค่า** → middleware ปิดอัตโนมัติ (dev mode — ห้ามใช้บน production ที่ Nginx เปิดออก public)
+
+### ตั้ง API Key
+
+```bash
+# Generate key (32 bytes hex = 64 chars)
+openssl rand -hex 32
+
+# Set in env (systemd, docker-compose, .env, etc.)
+export OMR_INTERNAL_API_KEY="abc123...64chars"
+python3 run_api.py
+```
+
+ดูรายละเอียดการตั้งบน production ใน [DEPLOY.md](DEPLOY.md)
+
 ## Endpoints
 
-| Method | Path     | คำอธิบาย                    |
-|--------|----------|-----------------------------|
-| GET    | /        | ข้อมูล service + ลิงก์ docs |
-| GET    | /health  | Health check                |
-| POST   | /check   | อัปโหลดรูป OMR → ได้ responses + score |
-| GET    | /checked/{file_path}         | รูปกระดาษที่ตรวจแล้ว (ใช้ `checked_omr_filename` จาก POST /check เช่น `2025-02/xxx.jpg`) |
-| GET    | /outputs/scans/CheckedOMRs/{file_path} | รูปกระดาษที่ตรวจแล้ว (alias) |
+| Method | Path     | Auth | คำอธิบาย                    |
+|--------|----------|------|-----------------------------|
+| GET    | /        | **Key** | ข้อมูล service + ลิงก์ docs |
+| GET    | /health  | -    | Health check (สำหรับ monitoring) |
+| GET    | /docs, /redoc | -    | API documentation UI |
+| POST   | /check   | **Key** | อัปโหลดรูป OMR → ได้ responses + score |
+| GET    | /checked/{file_path}         | **Key** | รูปกระดาษที่ตรวจแล้ว (ใช้ `checked_omr_filename` จาก POST /check) |
+| GET    | /outputs/scans/CheckedOMRs/{file_path} | **Key** | รูปกระดาษที่ตรวจแล้ว (alias) |
+| DELETE | /exam/{school_id}/{exam_id}  | **Key** | ลบไฟล์ทั้งหมดของ exam |
+| DELETE | /school/{school_id}          | **Key** | ลบไฟล์ทั้งหมดของโรงเรียน |
 
 ## POST /check
 
 - **Body:** `multipart/form-data`
   - **image** (required): ไฟล์รูปกระดาษคำตอบ (.jpg, .jpeg, .png)
-  - **template_id** (optional): ชื่อเทมเพลต (default: `default`)
+  - **template_id** (optional): ชื่อเทมเพลต = ชื่อโฟลเดอร์ใต้ `templates/` (เช่น `20q`, `30q`, `50q`). Default: `50q`
   - **evaluate** (optional): `true`/`false` (default: `true`) — ถ้า `false` จะไม่ใช้ evaluation เลย ได้แค่ raw responses
   - **evaluation** (optional): **JSON string** ของ evaluation config (ส่งจาก Laravel ได้) — ถ้าส่งมา API จะใช้ชุดนี้คิดคะแนนและส่ง `score` + `evaluation` กลับ และ**รูป Checked OMR จะวาดวงกลมสีเขียวทับข้อที่ถูก สีแดงทับข้อที่ผิด** (ไม่ใช้ evaluation.json ในเทมเพลต)
+  - **school_id** (optional): รหัสโรงเรียน — ใช้จัดเก็บไฟล์เป็น `CheckedOMRs/<school_id>/<exam_id>/<YYYY-MM>/<file>` เพื่อให้ลบเป็นกลุ่มได้ภายหลัง  
+    รูปแบบ: `[A-Za-z0-9_-]{1,64}` (เช่น `12`, `bkk_school_001`)
+  - **exam_id** (optional): รหัสแบบทดสอบ — ใช้คู่กับ `school_id` (จะใส่อันใดอันหนึ่งโดด ๆ ก็ได้)
 - **Response:** JSON
   - `request_id`, `file_id`, `score`, `responses` (Roll, q1, q2, …), `evaluation` (รายละเอียดข้อละข้อ ถ้ามีการคิดคะแนน)
-  - `checked_omr_path` (ถ้ามี): path เช่น `outputs/scans/CheckedOMRs/2025-02/xxx.jpg` (แยกโฟลเดอร์ตามเดือน)
-  - `checked_omr_filename` (ถ้ามี): path สำหรับโหลดรูป เช่น `2025-02/5d52e9f5-ef0c-411e-985e-aeccbf42a3e4_image.jpg` — **ใช้ค่านี้ใส่ใน URL โหลดรูป**
+  - `checked_omr_path` (ถ้ามี): path เช่น `outputs/scans/CheckedOMRs/12/42/2026-04/xxx.jpg` (path ขึ้นกับว่าส่ง school_id/exam_id มาไหม)
+  - `checked_omr_filename` (ถ้ามี): subpath ภายใต้ `CheckedOMRs/` สำหรับโหลดรูป เช่น `12/42/2026-04/uuid_image.jpg` — **ใช้ค่านี้ใส่ใน URL โหลดรูป**
 
-- **เปิดรูป Checked OMR ผ่าน HTTP:** ใช้ **`base_url + "/checked/" + checked_omr_filename`** (เช่น `http://127.0.0.1:8080/checked/2025-02/5d52e9f5-ef0c-411e-985e-aeccbf42a3e4_image.jpg`)
+### Path layout ของ Checked OMR
+
+ขึ้นกับว่าส่ง `school_id`/`exam_id` หรือไม่
+
+| ส่ง | ไฟล์เก็บที่ |
+|---|---|
+| school_id + exam_id | `CheckedOMRs/<school_id>/<exam_id>/<YYYY-MM>/<file>` |
+| เฉพาะ school_id | `CheckedOMRs/<school_id>/<YYYY-MM>/<file>` |
+| ไม่ส่งเลย (legacy) | `CheckedOMRs/<YYYY-MM>/<file>` |
+
+> แนะนำใช้ทั้ง school_id + exam_id เสมอ — รองรับการ cleanup ผ่าน `DELETE /exam/{school_id}/{exam_id}` ได้
+
+- **เปิดรูป Checked OMR ผ่าน HTTP:** ใช้ **`base_url + "/checked/" + checked_omr_filename`** (เช่น `http://127.0.0.1:8080/checked/12/42/2026-04/uuid_image.jpg`)
 
 ### ตัวอย่าง (curl)
 
 ```bash
 curl -X POST http://localhost:8080/check \
+  -H "Authorization: Bearer YOUR_INTERNAL_KEY" \
   -F "image=@/path/to/sheet.jpg" \
-  -F "template_id=default"
+  -F "template_id=50q" \
+  -F "school_id=12" \
+  -F "exam_id=42"
 ```
 
 ### ตัวอย่างส่ง evaluation จาก Laravel
@@ -133,11 +184,12 @@ curl -X POST http://localhost:8080/check \
 
 ```bash
 curl -X POST http://localhost:8080/check \
+  -H "Authorization: Bearer YOUR_INTERNAL_KEY" \
   -F "image=@/path/to/sheet.jpg" \
   -F "evaluation={\"source_type\":\"custom\",\"options\":{...},\"marking_schemes\":{...}}"
 ```
 
-Laravel ตัวอย่าง:
+Laravel ตัวอย่าง (พร้อม Bearer token + school_id / exam_id):
 
 ```php
 $evaluation = [
@@ -152,11 +204,122 @@ $evaluation = [
         'DEFAULT' => ['correct' => '1', 'incorrect' => '0', 'unmarked' => '0'],
     ],
 ];
-Http::attach('image', $imageContent, 'sheet.jpg')
+
+Http::withToken(config('omr.internal_api_key'))
+    ->attach('image', $imageContent, 'sheet.jpg')
     ->post($apiUrl . '/check', [
-        'evaluation' => json_encode($evaluation),
+        'template_id' => '50q',
+        'school_id'   => (string) $school->id,
+        'exam_id'     => (string) $exam->id,
+        'evaluation'  => json_encode($evaluation),
     ]);
 ```
+
+> `Http::withToken($key)` จะใส่ `Authorization: Bearer $key` อัตโนมัติ
+
+## DELETE Endpoints (cleanup)
+
+ใช้สำหรับลบไฟล์ที่ตรวจแล้วเมื่อ Laravel ลบ exam หรือ school — ต้องใส่ `Authorization: Bearer <key>` ตามนโยบาย global auth
+
+### DELETE /exam/{school_id}/{exam_id}
+
+ลบไฟล์ checked OMR ทั้งหมดของ exam หนึ่ง ๆ — ใช้ตอน Laravel ลบแบบทดสอบ
+
+```bash
+curl -X DELETE http://localhost:8080/exam/12/42 \
+  -H "Authorization: Bearer YOUR_INTERNAL_KEY"
+```
+
+Response
+
+```json
+{ "deleted": true, "path": "12/42", "files_removed": 35 }
+```
+
+ถ้าไม่มีไฟล์อยู่ (ไม่เคยส่งสอบนี้)
+
+```json
+{ "deleted": false, "message": "Exam folder not found", "path": "12/42" }
+```
+
+### DELETE /school/{school_id}
+
+ลบไฟล์ทั้งหมดของโรงเรียน — **ใช้ระวัง** (ลบทุก exam, ทุกเดือน, ทุกไฟล์ภายใต้ school_id)
+
+```bash
+curl -X DELETE http://localhost:8080/school/12 \
+  -H "Authorization: Bearer YOUR_INTERNAL_KEY"
+```
+
+### Laravel ตัวอย่าง
+
+```php
+// ใน ExamObserver::deleted หรือ ExamController::destroy
+Http::withToken(config('omr.internal_api_key'))
+    ->delete(config('omr.api_url_base') . "/exam/{$school->id}/{$exam->id}");
+```
+
+`config/omr.php`
+
+```php
+'api_url_base'     => env('OMR_API_URL_BASE', 'http://127.0.0.1:8080'),
+'internal_api_key' => env('OMR_INTERNAL_API_KEY', ''),
+```
+
+`.env` ของ Laravel
+
+```bash
+OMR_API_URL_BASE=http://127.0.0.1:8080
+OMR_INTERNAL_API_KEY=YOUR_INTERNAL_KEY  # ค่าเดียวกับฝั่ง OMR API
+```
+
+## ⚠️ ผลกระทบ: การแสดงรูป Checked OMR ในเบราว์เซอร์
+
+เพราะ `/checked/{path}` ก็ต้อง auth → `<img src="...">` ตรง ๆ ไม่ทำงานแล้ว
+
+**ทางเลือก** (เลือกตามที่เหมาะ)
+
+### A. Laravel proxy รูปให้ browser (แนะนำ)
+
+สร้าง route ใน Laravel ที่รับ path → fetch รูปจาก OMR API ด้วย Bearer token → return ให้ browser
+
+```php
+// routes/web.php
+Route::get('/omr/checked-image/{path}', [OmrController::class, 'checkedImage'])
+    ->where('path', '.*');
+
+// app/Http/Controllers/OmrController.php
+public function checkedImage(string $path)
+{
+    $url = config('omr.api_url_base') . '/checked/' . $path;
+    $response = Http::withToken(config('omr.internal_api_key'))->get($url);
+    if ($response->status() !== 200) {
+        abort(404);
+    }
+    return response($response->body())
+        ->header('Content-Type', $response->header('Content-Type'));
+}
+```
+
+แล้วใน Blade ใช้
+
+```html
+<img src="{{ url('/omr/checked-image/' . $checkedOmrFilename) }}" alt="Checked OMR">
+```
+
+### B. Signed URLs (advanced)
+
+ถ้ามี traffic เยอะแล้ว Laravel proxy หนัก → ทำ signed URL ที่หมดอายุ (เช่น 5 นาที) ใน OMR API ให้ browser hit ตรง — แต่ต้อง implement เอง
+
+### C. Whitelist `/checked/` (ไม่แนะนำ — ไม่ปลอดภัย)
+
+ถ้ายอม trade off ความปลอดภัย สามารถเอา `/checked/` ออกจาก auth ได้ — แก้ใน `api/main.py`
+
+```python
+_AUTH_BYPASS_PREFIXES: tuple[str, ...] = ("/docs", "/redoc", "/openapi.json", "/checked/")
+```
+
+> ⚠️ ใครก็เข้าเว็บแล้ว guess UUID ได้จะดูรูปคนอื่น — ใช้ได้เฉพาะกรณีที่ filename ยากเดา (uuid v4) และข้อมูลไม่ sensitive
 
 ### ตัวอย่าง (Flutter / Laravel)
 

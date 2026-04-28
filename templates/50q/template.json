@@ -1,49 +1,49 @@
 {
-  "pageDimensions": [1800, 2400],
-  "bubbleDimensions": [23, 20],
+  "pageDimensions": [1748, 2480],
+  "bubbleDimensions": [45, 45],
   "customLabels": {
-    "Roll": ["roll1", "roll2", "roll3", "roll4","roll5","roll6"]
+    "Roll": ["roll1", "roll2", "roll3", "roll4", "roll5"]
   },
   "fieldBlocks": {
     "Roll": {
-      "origin": [120, 720],
-      "bubblesGap": 70,
-      "labelsGap": 79,
-      "fieldLabels": ["roll1", "roll2", "roll3", "roll4","roll5","roll6"],
+      "origin": [190,620],
+      "bubblesGap": 72.5,
+      "labelsGap": 76,
+      "fieldLabels": ["roll1", "roll2", "roll3", "roll4", "roll5"],
       "fieldType": "QTYPE_INT"
     },
     "q01block": {
-      "origin": [780, 735],
-      "bubblesGap": 78,
-      "labelsGap": 70,
+      "origin": [700, 620],
+      "bubblesGap": 75.5,
+      "labelsGap": 72.5,
       "fieldLabels": ["q1..10"],
       "fieldType": "QTYPE_MCQ5"
     },
-    "q02block": {
-      "origin": [1360, 735],
-      "bubblesGap": 78,
-      "labelsGap": 70,
+    "q02block": { 
+      "origin": [1235, 620],
+      "bubblesGap": 75.5,
+      "labelsGap": 72.5,
       "fieldLabels": ["q11..20"],
       "fieldType": "QTYPE_MCQ5"
     },
     "q03block": {
-      "origin": [195, 1635],
-      "bubblesGap": 78,
-      "labelsGap": 70,
+      "origin": [188, 1575],
+      "bubblesGap": 75.5,
+      "labelsGap": 72.5,
       "fieldLabels": ["q21..30"],
       "fieldType": "QTYPE_MCQ5"
     },
     "q04block": {
-      "origin": [780, 1635],
-      "bubblesGap": 78,
-      "labelsGap": 70,
+      "origin": [695, 1575],
+      "bubblesGap": 75.5,
+      "labelsGap": 72.5,
       "fieldLabels": ["q31..40"],
       "fieldType": "QTYPE_MCQ5"
     },
     "q05block": {
-      "origin": [1360, 1635],
-      "bubblesGap": 78,
-      "labelsGap": 70,
+      "origin": [1230, 1575],
+      "bubblesGap": 75.5,
+      "labelsGap": 72.5,
       "fieldLabels": ["q41..50"],
       "fieldType": "QTYPE_MCQ5"
     }
