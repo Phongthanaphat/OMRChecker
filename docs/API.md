@@ -92,10 +92,18 @@ Authorization: Bearer <OMR_INTERNAL_API_KEY>
 **ยกเว้น** path เหล่านี้ที่ไม่ต้องใช้ key (whitelist)
 
 - `/health` — สำหรับ systemd / monitoring
-- `/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect` — Swagger / ReDoc UI
+- `/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect` — Swagger / ReDoc UI (เฉพาะตอน `OMR_ENABLE_DOCS=true`)
 - HTTP `OPTIONS` request (CORS preflight)
 
 ถ้า env var `OMR_INTERNAL_API_KEY` **ไม่ถูกตั้งค่า** → middleware ปิดอัตโนมัติ (dev mode — ห้ามใช้บน production ที่ Nginx เปิดออก public)
+
+แนะนำ production:
+
+```bash
+OMR_ENABLE_DOCS=false
+```
+
+เมื่อปิด docs แล้ว จะไม่ expose `/docs`, `/redoc`, `/openapi.json` เลย (404)
 
 ### ตั้ง API Key
 
@@ -117,7 +125,7 @@ python3 run_api.py
 | GET    | /        | **Key** | ข้อมูล service + ลิงก์ docs |
 | GET    | /templates | **Key** | รายการ `template_id` ที่มี `template.json` |
 | GET    | /health  | -    | Health check (สำหรับ monitoring) |
-| GET    | /docs, /redoc | -    | API documentation UI |
+| GET    | /docs, /redoc | - (when enabled) | API documentation UI (ปิดได้ด้วย `OMR_ENABLE_DOCS=false`) |
 | POST   | /check   | **Key** | อัปโหลดรูป OMR → ได้ responses + score |
 | GET    | /checked/{file_path}         | **Key** | รูปกระดาษที่ตรวจแล้ว (ใช้ `checked_omr_filename` จาก POST /check) |
 | GET    | /outputs/scans/CheckedOMRs/{file_path} | **Key** | รูปกระดาษที่ตรวจแล้ว (alias) |

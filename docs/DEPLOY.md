@@ -106,6 +106,7 @@ sudo nano /var/www/OMRChecker/.env
 
 ```dotenv
 OMR_INTERNAL_API_KEY=paste_key_from_openssl_rand_hex_32
+OMR_ENABLE_DOCS=false
 ```
 
 สร้าง key:
@@ -148,12 +149,15 @@ ExecStart=/var/www/OMRChecker/venv/bin/python3 run_api.py --host 127.0.0.1 --por
 
 - **`--host 127.0.0.1`** — ให้เฉพาะ Laravel บน VPS เรียกได้ (ไม่เปิด port 8080 ออกนอก)
 - **`--workers 4`** — 4 งานพร้อมกัน (ปรับตามจำนวน CPU ได้ เช่น 2 หรือ 6)
-- **`OMR_INTERNAL_API_KEY`** — ใส่ใน `/var/www/OMRChecker/.env` (ไม่ใส่ใน unit) — Global API key สำหรับ **ทุก endpoint** (ยกเว้น `/health`, `/docs`, `/redoc`, `/openapi.json`)
+- **`OMR_INTERNAL_API_KEY`** — ใส่ใน `/var/www/OMRChecker/.env` (ไม่ใส่ใน unit) — Global API key สำหรับทุก endpoint (ยกเว้น `/health` และ docs routes เฉพาะตอนที่ `OMR_ENABLE_DOCS=true`)
   - **บังคับใส่ถ้าเปิด API ออก public ผ่าน Nginx** (เช่น `location /api/omr/ { proxy_pass ...; }`) ไม่งั้นใครก็เรียก API ได้
   - สุ่ม key ด้วย `openssl rand -hex 32` (output 64 hex chars)
   - ค่าเดียวกันต้องไปใส่ใน Laravel `.env` → `OMR_INTERNAL_API_KEY=...`
   - ถ้าไม่ตั้งค่า env var → middleware **ปิดอัตโนมัติ** (dev local mode — ห้ามใช้บน production)
   - Client ทุกตัวต้องส่ง header `Authorization: Bearer <key>` ในทุก request (รวมถึง POST /check และ GET /checked/...)
+- **`OMR_ENABLE_DOCS`** — เปิด/ปิดหน้าเอกสาร API
+  - แนะนำบน production: `OMR_ENABLE_DOCS=false` (ปิด `/docs`, `/redoc`, `/openapi.json` ทั้งหมด)
+  - ค่า true ที่รองรับ: `1`, `true`, `yes`, `on`
 
 ### 4.3 เปิดใช้และสตาร์ท
 

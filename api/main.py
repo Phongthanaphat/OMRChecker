@@ -45,6 +45,19 @@ _template_file_cache: dict[str, dict[str, bytes]] = {}
 # Set via OMR_INTERNAL_API_KEY env var. If empty, auth is disabled (dev mode only — DO NOT use in production with public Nginx).
 INTERNAL_API_KEY = os.getenv("OMR_INTERNAL_API_KEY", "").strip()
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse boolean-like env values (1/true/yes/on)."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# API docs exposure toggle.
+# Production recommendation: OMR_ENABLE_DOCS=false to disable /docs, /redoc, /openapi.json.
+ENABLE_DOCS = _env_flag("OMR_ENABLE_DOCS", True)
+
 # Pattern for school_id / exam_id: alphanumeric + dash + underscore, 1-64 chars.
 # Strict to prevent path traversal (no "..", "/", "\") and keep folder names sane.
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -140,8 +153,9 @@ app = _App(
     title="OMR Checker API",
     description="Upload OMR sheet image, get responses and score as JSON.",
     version="1.0.0",
-    docs_url="/docs",
-    openapi_url="/openapi.json",
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
     root_path="/api/omr"
 )
 
@@ -158,10 +172,11 @@ app.add_middleware(
 
 # Paths that bypass the global auth middleware. Keep this list small.
 # - /health: needed by systemd / load balancer health checks (no secrets exposed)
-# - /docs, /redoc, /openapi.json: API documentation (consider protecting in production
-#   if you don't want public schema discovery — but they don't expose data without auth)
+# - /docs, /redoc, /openapi.json: API documentation (only when ENABLE_DOCS=true)
 _AUTH_BYPASS_PATHS: set[str] = {"/health"}
-_AUTH_BYPASS_PREFIXES: tuple[str, ...] = ("/docs", "/redoc", "/openapi.json")
+_AUTH_BYPASS_PREFIXES: tuple[str, ...] = (
+    ("/docs", "/redoc", "/openapi.json") if ENABLE_DOCS else tuple()
+)
 
 
 @app.middleware("http")
