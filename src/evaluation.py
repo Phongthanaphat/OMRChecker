@@ -25,9 +25,54 @@ from src.utils.parsing import (
 class AnswerMatcher:
     def __init__(self, answer_item, section_marking_scheme):
         self.section_marking_scheme = section_marking_scheme
+        answer_item = self.normalize_answer_item(answer_item)
         self.answer_item = answer_item
         self.answer_type = self.validate_and_get_answer_type(answer_item)
         self.set_defaults_from_scheme(section_marking_scheme)
+
+    @staticmethod
+    def normalize_answer_item(answer_item):
+        """JSON from clients (e.g. PHP/Laravel) may send ints for choices; coerce to strings."""
+        # ["A"] or [3] wrapped as single-element array → unwrap after inner normalization
+        if isinstance(answer_item, list) and len(answer_item) == 1:
+            inner = answer_item[0]
+            if not (isinstance(inner, list) and len(inner) == 2):
+                return AnswerMatcher.normalize_answer_item(inner)
+        if isinstance(answer_item, bool):
+            return answer_item
+        if isinstance(answer_item, (int, float)):
+            return str(answer_item)
+        if isinstance(answer_item, list):
+            out = []
+            for el in answer_item:
+                if (
+                    isinstance(el, list)
+                    and len(el) == 2
+                    and isinstance(el[1], (str, int, float))
+                    and not isinstance(el[1], bool)
+                ):
+                    a0, score = el[0], el[1]
+                    if isinstance(a0, (int, float)) and not isinstance(a0, bool):
+                        a0 = str(a0)
+                    out.append([a0, score])
+                else:
+                    out.append(AnswerMatcher.normalize_answer_item(el))
+            return out
+        if isinstance(answer_item, str):
+            s = answer_item.strip()
+            if len(s) == 0:
+                raise ValueError(
+                    'answers_in_order contains an empty or whitespace-only string. '
+                    "Each position must have a letter (or string) answer, e.g. 'A'. "
+                    "Check Laravel: do not omit keys, do not json_encode blanks for unanswered bank lines."
+                )
+            return s
+        if answer_item is None:
+            raise ValueError(
+                'answers_in_order contains null. Use a concrete answer string per question (e.g. "A"); '
+                "do not send JSON null entries from Laravel."
+            )
+        return answer_item
 
     @staticmethod
     def is_a_marking_score(answer_element):
@@ -68,9 +113,11 @@ class AnswerMatcher:
                 return "multiple-correct-weighted"
 
         logger.critical(
-            f"Unable to determine answer type for answer item: {answer_item}"
+            f"Unable to determine answer type for answer item (type={type(answer_item).__name__}): "
+            f"{repr(answer_item)}. "
+            "Use strings for standard answers ('A','B',...); lists need 2+ string options or [['A',1],['B',2]]."
         )
-        raise Exception("Unable to determine answer type")
+        raise Exception("Unable to determine answer type") from None
 
     def set_defaults_from_scheme(self, section_marking_scheme):
         answer_type = self.answer_type

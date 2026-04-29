@@ -12,3 +12,8 @@ outputs/*
 **/__pycache__
 venv/
 OMRChecker.wiki/
+
+.env
+.env.backup
+.env.production
+.env deploy

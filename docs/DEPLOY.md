@@ -93,7 +93,37 @@ curl -s http://127.0.0.1:8080/health
 
 ## 4. ตั้ง systemd (ให้ API รันอัตโนมัติ + Optimize)
 
-### 4.1 คัดลอก unit และแก้ path
+### 4.1 สร้างไฟล์ `.env` บน VPS (secret — ห้ามขึ้น git)
+
+Unit ตัวอย่างใช้ **`EnvironmentFile=/var/www/OMRChecker/.env`** โหลดตัวแปรก่อนรัน process (รวม `OMR_INTERNAL_API_KEY`)
+
+```bash
+sudo install -m 600 -o www-data -g www-data /dev/null /var/www/OMRChecker/.env
+sudo nano /var/www/OMRChecker/.env
+```
+
+ใส่รูปแบบ **KEY=value** บรรทัดละตัว — **ห้าม** ใส่คำว่า `export` (systemd ไม่ใช้รูปแบบ shell):
+
+```dotenv
+OMR_INTERNAL_API_KEY=paste_key_from_openssl_rand_hex_32
+```
+
+สร้าง key:
+
+```bash
+openssl rand -hex 32
+```
+
+สิทธิ์ไฟล์ (ถ้าสร้างด้วย root แล้ว):
+
+```bash
+sudo chown www-data:www-data /var/www/OMRChecker/.env
+sudo chmod 600 /var/www/OMRChecker/.env
+```
+
+> ใน unit ตัวอย่างใช้ `EnvironmentFile=-/var/www/OMRChecker/.env` — เครื่องหมาย `-` หมายความว่าถ้ายังไม่มีไฟล์ service ยัง start ได้ (เหมาะ dev). บน production ที่บังคับต้องมี key ให้เอา `-` ออก → ไม่มีไฟล์จะ start ไม่ขึ้น (fail-safe)
+
+### 4.2 คัดลอก unit และแก้ path
 
 ```bash
 sudo cp deploy/omr-checker-api.service /etc/systemd/system/
@@ -107,25 +137,25 @@ sudo nano /etc/systemd/system/omr-checker-api.service
 | `WorkingDirectory` | path โปรเจกต์จริง เช่น `/var/www/OMRChecker` |
 | `User` / `Group` | user ที่รันเว็บ (มัก `www-data`) |
 | `Environment="PATH=..."` | `PATH=/var/www/OMRChecker/venv/bin` (path ถึง venv) |
+| `EnvironmentFile=...` | ตรงกับ path โปรเจกต์ เช่น `/var/www/OMRChecker/.env` |
 | `ExecStart` | ใช้ path venv จริง เช่น `/var/www/OMRChecker/venv/bin/python3 run_api.py ...` |
 
 ตัวอย่าง ExecStart ที่ใช้แล้ว (พร้อม optimize):
 
 ```ini
-Environment="OMR_INTERNAL_API_KEY=REPLACE_WITH_RANDOM_KEY"
 ExecStart=/var/www/OMRChecker/venv/bin/python3 run_api.py --host 127.0.0.1 --port 8080 --workers 4
 ```
 
 - **`--host 127.0.0.1`** — ให้เฉพาะ Laravel บน VPS เรียกได้ (ไม่เปิด port 8080 ออกนอก)
 - **`--workers 4`** — 4 งานพร้อมกัน (ปรับตามจำนวน CPU ได้ เช่น 2 หรือ 6)
-- **`OMR_INTERNAL_API_KEY`** — Global API key สำหรับ **ทุก endpoint** (ยกเว้น `/health`, `/docs`, `/redoc`, `/openapi.json`)
+- **`OMR_INTERNAL_API_KEY`** — ใส่ใน `/var/www/OMRChecker/.env` (ไม่ใส่ใน unit) — Global API key สำหรับ **ทุก endpoint** (ยกเว้น `/health`, `/docs`, `/redoc`, `/openapi.json`)
   - **บังคับใส่ถ้าเปิด API ออก public ผ่าน Nginx** (เช่น `location /api/omr/ { proxy_pass ...; }`) ไม่งั้นใครก็เรียก API ได้
   - สุ่ม key ด้วย `openssl rand -hex 32` (output 64 hex chars)
   - ค่าเดียวกันต้องไปใส่ใน Laravel `.env` → `OMR_INTERNAL_API_KEY=...`
   - ถ้าไม่ตั้งค่า env var → middleware **ปิดอัตโนมัติ** (dev local mode — ห้ามใช้บน production)
   - Client ทุกตัวต้องส่ง header `Authorization: Bearer <key>` ในทุก request (รวมถึง POST /check และ GET /checked/...)
 
-### 4.2 เปิดใช้และสตาร์ท
+### 4.3 เปิดใช้และสตาร์ท
 
 ```bash
 sudo systemctl daemon-reload
@@ -136,7 +166,7 @@ sudo systemctl status omr-checker-api
 
 ควรเห็น `Active: active (running)` และไม่มี error สีแดง
 
-### 4.3 คำสั่งที่ใช้บ่อย
+### 4.4 คำสั่งที่ใช้บ่อย
 
 ```bash
 # ดูสถานะ
