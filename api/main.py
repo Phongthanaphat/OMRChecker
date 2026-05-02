@@ -226,6 +226,9 @@ UNKNOWN_SCHOOL_ID = "_unknown"
 CHECKED_MAX_SIDE = 1600
 CHECKED_TARGET_BYTES = 900 * 1024  # target under ~1MB if possible
 
+# When template defines customLabels.Roll, reject implausible reads (bad photo / alignment).
+ROLL_VALIDATION_MIN_LEN = 4
+
 
 def _checked_sub_parts(school_id: str | None, exam_id: str | None, month_folder: str) -> list[str]:
     parts: list[str] = [CHECKED_OMR_SCHOOL_PREFIX, school_id or UNKNOWN_SCHOOL_ID]
@@ -262,6 +265,44 @@ def _persist_checked_image_optimized(checked_src: Path, persistent_dest: Path) -
             return persistent_dest
 
     raise OSError("Failed to encode checked image")
+
+
+def _validate_roll_if_configured(template_json: dict, row: pd.Series) -> None:
+    """If template has customLabels.Roll, require Roll to be digits-only with length in [ROLL_VALIDATION_MIN_LEN, N].
+
+    N = expanded roll slot count (e.g. 5 for roll1..roll5). On failure: HTTP 400 (no success payload, no checked image).
+    """
+    custom = template_json.get("customLabels")
+    if not isinstance(custom, dict) or "Roll" not in custom:
+        return
+    roll_keys = custom.get("Roll")
+    if not isinstance(roll_keys, list) or not roll_keys:
+        return
+    try:
+        from src.utils.parsing import parse_fields
+
+        parsed_keys = parse_fields("Custom Label: Roll", roll_keys)
+    except Exception as e:
+        logger.info("Roll validation skipped: cannot parse customLabels.Roll (%s)", e)
+        return
+    max_slots = len(parsed_keys)
+    roll = str(row.get("Roll", "")).strip()
+    if (
+        roll
+        and roll.isdigit()
+        and len(roll) >= ROLL_VALIDATION_MIN_LEN
+        and len(roll) <= max_slots
+    ):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Invalid Roll (student ID read from sheet): must be {ROLL_VALIDATION_MIN_LEN}–{max_slots} "
+            "digits (0–9 only). This usually means the image is unclear, cropped, or poorly lit — retake or rescan. "
+            f"รหัสนักเรียน (Roll) ต้องเป็นตัวเลข {ROLL_VALIDATION_MIN_LEN}–{max_slots} หลัก "
+            "หากไม่ถูกต้องมักเกิดจากภาพไม่ชัดหรือกรอบกระดาษไม่ครบ — กรุณาสแกนใหม่"
+        ),
+    )
 
 
 def _serve_checked_omr_file(file_path: str):
@@ -519,6 +560,9 @@ async def check_omr(
                     score = float(raw_score)
                 except ValueError:
                     score = None
+
+        template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
+        _validate_roll_if_configured(template_for_roll, row)
 
         # Build responses dict from template columns (file_id, input_path, output_path, score, then Roll, q1, ...)
         response_cols = [c for c in df.columns if c not in ("file_id", "input_path", "output_path", "score")]
