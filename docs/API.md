@@ -139,13 +139,14 @@ python3 run_api.py
   - **template_id** (optional): ชื่อเทมเพลต = ชื่อโฟลเดอร์ใต้ `templates/` (เช่น `20q`, `30q`, `50q`). Default: `50q`
   - **evaluate** (optional): `true`/`false` (default: `true`) — ถ้า `false` จะไม่ใช้ evaluation เลย ได้แค่ raw responses
   - **evaluation** (optional): **JSON string** ของ evaluation config (ส่งจาก Laravel ได้) — ถ้าส่งมา API จะใช้ชุดนี้คิดคะแนนและส่ง `score` + `evaluation` กลับ และ**รูป Checked OMR จะวาดวงกลมสีเขียวทับข้อที่ถูก สีแดงทับข้อที่ผิด** (ไม่ใช้ evaluation.json ในเทมเพลต)
-  - **school_id** (optional): รหัสโรงเรียน — ใช้จัดเก็บไฟล์เป็น `CheckedOMRs/<school_id>/<exam_id>/<YYYY-MM>/<file>` เพื่อให้ลบเป็นกลุ่มได้ภายหลัง  
+  - **school_id** (optional): รหัสโรงเรียน — ใช้จัดโฟลเดอร์ใต้ `CheckedOMRs/school/<school_id>/...` (ถ้าไม่ส่งจะใช้ `_unknown`)  
     รูปแบบ: `[A-Za-z0-9_-]{1,64}` (เช่น `12`, `bkk_school_001`)
-  - **exam_id** (optional): รหัสแบบทดสอบ — ใช้คู่กับ `school_id` (จะใส่อันใดอันหนึ่งโดด ๆ ก็ได้)
+  - **exam_id** (**บังคับ**): รหัสแบบทดสอบ/วิชา — Laravel ต้องส่งทุกครั้ง ไม่ส่งจะได้ **HTTP 400** (`detail` อธิบายว่าประมวลผลไม่ได้)  
+    รูปแบบ: `[A-Za-z0-9_-]{1,64}` — ใช้จัดเก็บรูป checked และให้สแกนซ้ำของ Roll เดิมทับไฟล์เดิมได้ (ดู Path layout)
 - **Response:** JSON
   - `request_id`, `file_id`, `score`, `responses` (Roll, q1, q2, …), `evaluation` (รายละเอียดข้อละข้อ ถ้ามีการคิดคะแนน)
-  - `checked_omr_path` (ถ้ามี): path เช่น `outputs/scans/CheckedOMRs/12/42/2026-04/xxx.jpg` (path ขึ้นกับว่าส่ง school_id/exam_id มาไหม)
-  - `checked_omr_filename` (ถ้ามี): subpath ภายใต้ `CheckedOMRs/` สำหรับโหลดรูป เช่น `12/42/2026-04/uuid_image.jpg` — **ใช้ค่านี้ใส่ใน URL โหลดรูป**
+  - `checked_omr_path` (ถ้ามี): path ภายใต้โปรเจกต์ เช่น `outputs/scans/CheckedOMRs/school/12/42/by-roll/12345.jpg`
+  - `checked_omr_filename` (ถ้ามี): subpath ภายใต้ `CheckedOMRs/` สำหรับโหลดรูป — **ใช้ค่านี้ใส่ใน URL โหลดรูป** (รูปแบบขึ้นกับว่ามี Roll ในเทมเพลตหรือไม่ ดูตารางด้านล่าง)
 
 ### การตรวจ Roll (เมื่อเทมเพลตมี `customLabels.Roll`)
 
@@ -176,17 +177,25 @@ python3 run_api.py
 
 ### Path layout ของ Checked OMR
 
-ขึ้นกับว่าส่ง `school_id`/`exam_id` หรือไม่
+โฟลเดอร์หลักคือ `outputs/scans/CheckedOMRs/school/...` (มี prefix `school/` เสมอ)
 
-| ส่ง | ไฟล์เก็บที่ |
+**เมื่อเทมเพลตมี `customLabels.Roll` และอ่าน Roll ได้เป็นตัวเลขล้วน** (ผ่าน validation แล้ว) API จะเก็บรูป checked แบบ **ทับไฟล์เดิมเมื่อสแกนซ้ำ** โดยใช้ Roll จากกระดาษเป็นชื่อไฟล์ (`exam_id` ส่งบังคับทุกครั้ง):
+
+| ส่ง school_id | ไฟล์เก็บที่ (ตัวอย่าง `exam_id=42`, Roll=`12345`) |
 |---|---|
-| school_id + exam_id | `CheckedOMRs/<school_id>/<exam_id>/<YYYY-MM>/<file>` |
-| เฉพาะ school_id | `CheckedOMRs/<school_id>/<YYYY-MM>/<file>` |
-| ไม่ส่งเลย (legacy) | `CheckedOMRs/<YYYY-MM>/<file>` |
+| มี | `CheckedOMRs/school/<school_id>/42/by-roll/12345.jpg` |
+| ไม่มี | `CheckedOMRs/school/_unknown/42/by-roll/12345.jpg` |
 
-> แนะนำใช้ทั้ง school_id + exam_id เสมอ — รองรับการ cleanup ผ่าน `DELETE /exam/{school_id}/{exam_id}` ได้
+**เทมเพลตไม่มี Roll หรือ Roll ว่าง/ไม่ใช่ตัวเลขล้วน** — ใช้โฟลเดอร์เดือน + ชื่อไฟล์ `uuid` (สร้างใหม่ทุกครั้ง):
 
-- **เปิดรูป Checked OMR ผ่าน HTTP:** ใช้ **`base_url + "/checked/" + checked_omr_filename`** (เช่น `http://127.0.0.1:8080/checked/12/42/2026-04/uuid_image.jpg`)
+| ส่ง school_id | ไฟล์เก็บที่ |
+|---|---|
+| มี | `CheckedOMRs/school/<school_id>/<exam_id>/<YYYY-MM>/<uuid>_<ชื่ออัปโหลด>.jpg` |
+| ไม่มี | `CheckedOMRs/school/_unknown/<exam_id>/<YYYY-MM>/<uuid>_....jpg` |
+
+> แนะนำส่ง `school_id` ด้วยเสมอ — จะได้ลบกลุ่มด้วย `DELETE /exam/{school_id}/{exam_id}` และไม่ปนกับโรงอื่นภายใต้ `_unknown`
+
+- **เปิดรูป Checked OMR ผ่าน HTTP:** ใช้ **`base_url + "/checked/" + checked_omr_filename`** (เช่น `http://127.0.0.1:8080/checked/school/12/42/by-roll/12345.jpg`)
 
 ### ตัวอย่าง (curl)
 

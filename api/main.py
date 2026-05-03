@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import cv2  # pyright: ignore[reportMissingImports]
 import pandas as pd  # pyright: ignore[reportMissingImports]
@@ -230,12 +231,42 @@ CHECKED_TARGET_BYTES = 900 * 1024  # target under ~1MB if possible
 ROLL_VALIDATION_MIN_LEN = 4
 
 
-def _checked_sub_parts(school_id: str | None, exam_id: str | None, month_folder: str) -> list[str]:
-    parts: list[str] = [CHECKED_OMR_SCHOOL_PREFIX, school_id or UNKNOWN_SCHOOL_ID]
-    if exam_id:
-        parts.append(exam_id)
-    parts.append(month_folder)
-    return parts
+def _roll_stem_for_checked_storage(responses: dict, template_json: dict) -> str | None:
+    """Use OMR-read Roll for stable filenames only when the template defines customLabels.Roll."""
+    custom = template_json.get("customLabels")
+    if not isinstance(custom, dict) or "Roll" not in custom:
+        return None
+    roll = str(responses.get("Roll", "")).strip()
+    if not roll or not roll.isdigit():
+        return None
+    if len(roll) > 32:
+        return None
+    return roll
+
+
+def _checked_omr_relative_parts(
+    *,
+    school_id: str | None,
+    exam_id: str,
+    month_folder: str,
+    roll_stem: str | None,
+    request_id: str,
+    upload_original_stem: str,
+) -> list[str]:
+    """Directory + filename under CHECKED_OMR_DIR (all segments, last is filename).
+
+    exam_id is always set (POST /check requires it). When roll_stem is set: .../exam_id/by-roll/{roll}.jpg
+    so rescans with same school + exam + roll overwrite. Otherwise .../exam_id/YYYY-MM/uuid_stem.jpg.
+    """
+    sid = school_id or UNKNOWN_SCHOOL_ID
+    base = [CHECKED_OMR_SCHOOL_PREFIX, sid, exam_id]
+    stem = (upload_original_stem or "upload").replace("/", "_").replace("\\", "_")[:120]
+
+    if roll_stem:
+        return [*base, "by-roll", f"{roll_stem}.jpg"]
+
+    fname = f"{request_id}_{stem}.jpg"
+    return [*base, month_folder, fname]
 
 
 def _persist_checked_image_optimized(checked_src: Path, persistent_dest: Path) -> Path:
@@ -330,7 +361,7 @@ async def serve_checked(file_path: str):
     """
     โหลดรูปกระดาษที่ตรวจแล้ว (Checked OMR).
     URL: base_url + /checked/ + checked_omr_filename
-    ใช้ checked_omr_filename จาก response ของ POST /check (รูปแบบ YYYY-MM/filename.jpg)
+    ใช้ checked_omr_filename จาก response ของ POST /check (เช่น .../by-roll/12345.jpg หรือ .../YYYY-MM/uuid_stem.jpg)
     """
     return _serve_checked_omr_file(file_path)
 
@@ -412,15 +443,22 @@ async def check_omr(
     template_id: str = DEFAULT_TEMPLATE_ID,
     evaluate: bool = True,
     evaluation: str | None = Form(None, description="Evaluation config as JSON (from Laravel). If provided, overrides template evaluation and enables scoring."),
-    school_id: str | None = Form(None, description="School identifier (optional). Used to organize Checked OMR files: CheckedOMRs/school/<school_id>/<exam_id>/<YYYY-MM>/<file>"),
-    exam_id: str | None = Form(None, description="Exam identifier (optional). Used together with school_id to group files by exam (enables targeted cleanup via DELETE /exam/{school_id}/{exam_id})."),
+    school_id: str | None = Form(
+        None,
+        description="School id (optional). With Roll-capable templates, checked images use school/exam/by-roll/<roll>.jpg and rescans overwrite.",
+    ),
+    exam_id: str | None = Form(
+        None,
+        description="Required. Exam identifier from Laravel. Same school+exam+Roll → same checked image path.",
+    ),
 ):
     """
     Upload an OMR sheet image. Returns responses (Roll, q1, q2, ...).
     - evaluation (optional): JSON string of evaluation config from Laravel. If sent, OMR will use it to compute score and return score + evaluation.
     - If evaluate=true and no evaluation JSON: use template's evaluation.json if present.
     - If evaluate=false and no evaluation JSON: raw responses only; Laravel can compute score.
-    - school_id / exam_id (optional): organize Checked OMR files into per-school/per-exam folders for targeted cleanup.
+    - exam_id (required): Laravel must send every time; checked OMR paths are under school/<school_id>/<exam_id>/...
+    - school_id (optional): defaults to _unknown if omitted.
     """
     if not image.filename:
         raise HTTPException(status_code=400, detail="No filename")
@@ -431,9 +469,17 @@ async def check_omr(
             detail="File must be .jpg, .jpeg or .png",
         )
 
-    # Validate school_id / exam_id (optional, but if provided must be safe)
     school_id = _safe_id(school_id, "school_id")
-    exam_id = _safe_id(exam_id, "exam_id")
+    if exam_id is None or (isinstance(exam_id, str) and exam_id.strip() == ""):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "exam_id is required: cannot process without an exam identifier. "
+                "Laravel must send exam_id on every POST /check. "
+                "ต้องส่ง exam_id — ไม่ส่งไม่สามารถประมวลผลได้"
+            ),
+        )
+    exam_id = cast(str, _safe_id(exam_id, "exam_id"))
 
     template_dir = get_template_dir(template_id)
     request_id = str(uuid.uuid4())
@@ -580,27 +626,30 @@ async def check_omr(
                     pass
 
         # Copy checked OMR image to persistent folder.
-        # Path layout: CheckedOMRs/school/<school_id>/<exam_id>/<YYYY-MM>/<file>
-        #   - exam_id optional
-        #   - if school_id missing, store under CheckedOMRs/school/_unknown/<YYYY-MM>/<file>
+        # When template defines Roll and the read Roll is digits-only: use .../by-roll/{roll}.jpg
+        # under the same school + exam so rescans overwrite one file (no UUID pile-up).
+        # Otherwise: legacy .../<YYYY-MM>/<uuid>_<stem>.jpg under the same folder layout as before.
         checked_omr_path = None
         checked_omr_filename = None
         checked_src = out_dir / "scans" / "CheckedOMRs" / file_id
         month_folder = datetime.now().strftime("%Y-%m")  # e.g. 2026-04
 
-        sub_parts = _checked_sub_parts(school_id, exam_id, month_folder)
-
-        persistent_checked_dir = CHECKED_OMR_DIR.joinpath(*sub_parts)
+        roll_stem = _roll_stem_for_checked_storage(responses, template_for_roll)
+        rel_parts = _checked_omr_relative_parts(
+            school_id=school_id,
+            exam_id=exam_id,
+            month_folder=month_folder,
+            roll_stem=roll_stem,
+            request_id=request_id,
+            upload_original_stem=Path(image.filename or "upload").stem,
+        )
+        persistent_dest = CHECKED_OMR_DIR.joinpath(*rel_parts)
         if checked_src.exists():
-            persistent_checked_dir.mkdir(parents=True, exist_ok=True)
-            original_stem = Path(image.filename or "upload").stem
-            safe_name = f"{request_id}_{original_stem}.jpg"
-            persistent_dest = persistent_checked_dir / safe_name
+            persistent_dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 _persist_checked_image_optimized(checked_src, persistent_dest)
                 checked_omr_path = str(persistent_dest.relative_to(PROJECT_ROOT))
-                # subpath under CheckedOMRs/ — used by /checked/{file_path:path}
-                checked_omr_filename = "/".join([*sub_parts, safe_name])
+                checked_omr_filename = "/".join(rel_parts)
             except OSError:
                 pass
 
@@ -643,7 +692,7 @@ async def delete_exam(school_id: str, exam_id: str):
     """
     Delete all Checked OMR files for a school's exam (use when exam is deleted in Laravel).
 
-    Removes: outputs/scans/CheckedOMRs/school/<school_id>/<exam_id>/  (all months under it)
+    Removes: outputs/scans/CheckedOMRs/school/<school_id>/<exam_id>/  (includes by-roll/ and legacy month folders)
     Auth: handled by global_auth_middleware (Authorization: Bearer <OMR_INTERNAL_API_KEY>)
     """
     school_id = _safe_id(school_id, "school_id", required=True) or ""
