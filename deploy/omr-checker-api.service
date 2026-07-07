@@ -19,6 +19,7 @@ WorkingDirectory=/var/www/OMRChecker
 Environment="PATH=/var/www/OMRChecker/venv/bin"
 # Secrets (OMR_INTERNAL_API_KEY, …): ไฟล์รูปแบบ KEY=value บรรทัดละตัว — ห้าม commit ไฟล์นี้
 # Prefix "-" = ถ้าไม่มีไฟล์ service ยัง start ได้ (dev); เอา "-" ออกถ้าต้องการบังคับให้มีไฟล์
+# หมายเหตุ: ถ้า OMR_INTERNAL_API_KEY ไม่ถูกตั้ง app จะ refuse start เอง (fail-fast)
 EnvironmentFile=-/var/www/OMRChecker/.env
 ExecStart=/var/www/OMRChecker/venv/bin/python3 run_api.py --host 127.0.0.1 --port 8080 --workers 4
 Restart=always

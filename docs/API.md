@@ -19,8 +19,9 @@ Backend API สำหรับตรวจข้อสอบ OMR รันบน
 # ติดตั้ง dependencies (รวม FastAPI, uvicorn)
 pip install -r requirements.txt
 
-# รัน API (port 8080)
-python run_api.py
+# รัน API (port 8080) — ต้องตั้ง OMR_INTERNAL_API_KEY ก่อน ไม่งั้น app ไม่ยอม start
+# (local dev ที่ยังไม่อยากตั้ง key: ใช้ OMR_ALLOW_NO_AUTH=1 แทน)
+OMR_INTERNAL_API_KEY=$(openssl rand -hex 32) python run_api.py
 
 # หรือระบุ port อื่น
 python run_api.py --port 8081
@@ -93,9 +94,9 @@ Authorization: Bearer <OMR_INTERNAL_API_KEY>
 
 - `/health` — สำหรับ systemd / monitoring
 - `/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect` — Swagger / ReDoc UI (เฉพาะตอน `OMR_ENABLE_DOCS=true`)
-- HTTP `OPTIONS` request (CORS preflight)
 
-ถ้า env var `OMR_INTERNAL_API_KEY` **ไม่ถูกตั้งค่า** → middleware ปิดอัตโนมัติ (dev mode — ห้ามใช้บน production ที่ Nginx เปิดออก public)
+ถ้า env var `OMR_INTERNAL_API_KEY` **ไม่ถูกตั้งค่า** → app จะ **ไม่ยอม start** (RuntimeError)
+เว้นแต่ตั้ง `OMR_ALLOW_NO_AUTH=1` ไว้ชัดเจน (สำหรับ local dev เท่านั้น — ห้ามใช้บน production)
 
 แนะนำ production:
 

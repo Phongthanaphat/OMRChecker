@@ -17,8 +17,7 @@ from typing import cast
 
 import cv2  # pyright: ignore[reportMissingImports]
 import pandas as pd  # pyright: ignore[reportMissingImports]
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 _App = FastAPI
@@ -42,8 +41,8 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 # Cache template files (template.json, config.json, omr_marker.jpg) per template_id to reduce disk I/O
 _template_file_cache: dict[str, dict[str, bytes]] = {}
 
-# Internal API key for sensitive operations (DELETE endpoints).
-# Set via OMR_INTERNAL_API_KEY env var. If empty, auth is disabled (dev mode only — DO NOT use in production with public Nginx).
+# Internal API key required on every request (global_auth_middleware).
+# Set via OMR_INTERNAL_API_KEY env var.
 INTERNAL_API_KEY = os.getenv("OMR_INTERNAL_API_KEY", "").strip()
 
 
@@ -53,6 +52,15 @@ def _env_flag(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Fail fast: refuse to start with auth disabled unless explicitly opted in for local dev.
+# (เดิม key ว่าง = ปิด auth เงียบ ๆ ทั้ง API รวม DELETE — อันตรายถ้าลืมตั้งตอน deploy)
+if not INTERNAL_API_KEY and not _env_flag("OMR_ALLOW_NO_AUTH", False):
+    raise RuntimeError(
+        "OMR_INTERNAL_API_KEY is not set. Refusing to start with authentication disabled. "
+        "Set OMR_INTERNAL_API_KEY, or set OMR_ALLOW_NO_AUTH=1 explicitly for local development."
+    )
 
 
 # API docs exposure toggle.
@@ -125,21 +133,6 @@ def _compact_evaluation_answer_pairs(eval_data: dict) -> dict:
     return {**eval_data, "options": new_opts}
 
 
-def _verify_internal_key(authorization: str | None = Header(None)) -> None:
-    """Verify Authorization: Bearer <OMR_INTERNAL_API_KEY> header for sensitive endpoints.
-
-    If OMR_INTERNAL_API_KEY env var is empty → auth is disabled (dev mode).
-    Use secrets.compare_digest to avoid timing attacks.
-    """
-    if not INTERNAL_API_KEY:
-        return  # Dev mode — no key configured
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header (expected: 'Bearer <key>')")
-    token = authorization[len("Bearer "):]
-    if not secrets.compare_digest(token, INTERNAL_API_KEY):
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-
 def _resolve_within_checked_dir(*parts: str) -> Path:
     """Resolve a subpath under CHECKED_OMR_DIR, raising 400 if path escapes the dir."""
     base = CHECKED_OMR_DIR.resolve()
@@ -161,14 +154,8 @@ app = _App(
 )
 
 
-# CORS: allow Laravel / browser to GET images (e.g. img src to checked_omr_path)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
+# หมายเหตุ: ไม่มี CORS middleware — browser ไม่เคยเรียก API นี้ตรง ๆ
+# (Laravel เป็น proxy ให้ทุกอย่าง รวมรูป checked ผ่าน /omr/checked-image ฝั่ง Laravel)
 
 
 # Paths that bypass the global auth middleware. Keep this list small.
@@ -185,15 +172,12 @@ async def global_auth_middleware(request: Request, call_next):
     """Require Authorization: Bearer <OMR_INTERNAL_API_KEY> on every request.
 
     Behaviors:
-    - If OMR_INTERNAL_API_KEY env var is empty → middleware is disabled (dev mode).
-    - CORS preflight (OPTIONS) is always allowed.
+    - If OMR_INTERNAL_API_KEY env var is empty (allowed only with OMR_ALLOW_NO_AUTH=1 — dev)
+      → middleware is disabled.
     - Whitelisted paths (see _AUTH_BYPASS_*) skip auth.
     - All other paths must include `Authorization: Bearer <key>` matching INTERNAL_API_KEY.
     """
     if not INTERNAL_API_KEY:
-        return await call_next(request)
-
-    if request.method == "OPTIONS":
         return await call_next(request)
 
     path = request.url.path
@@ -438,7 +422,7 @@ def list_templates():
 
 
 @app.post("/check")
-async def check_omr(
+def check_omr(
     image: UploadFile = File(..., description="OMR sheet image (jpg/png)"),
     template_id: str = DEFAULT_TEMPLATE_ID,
     evaluate: bool = True,
@@ -459,6 +443,9 @@ async def check_omr(
     - If evaluate=false and no evaluation JSON: raw responses only; Laravel can compute score.
     - exam_id (required): Laravel must send every time; checked OMR paths are under school/<school_id>/<exam_id>/...
     - school_id (optional): defaults to _unknown if omitted.
+
+    Sync `def` (ไม่ใช่ async) โดยตั้งใจ — FastAPI จะรันใน threadpool ทำให้งาน OpenCV
+    ที่กิน CPU หนักไม่ block event loop (ไม่งั้น /health และ request อื่นค้างทั้งหมด)
     """
     if not image.filename:
         raise HTTPException(status_code=400, detail="No filename")
@@ -509,7 +496,8 @@ async def check_omr(
             eval_data = _compact_evaluation_answer_pairs(eval_data)
             opts_raw = eval_data.get("options")
             opts = opts_raw if isinstance(opts_raw, dict) else {}
-            if opts.get("source_type") == "custom":
+            # source_type อยู่ top-level ของ eval_data (ไม่ใช่ใน options)
+            if eval_data.get("source_type") == "custom":
                 ao = opts.get("answers_in_order")
                 if isinstance(ao, list) and len(ao) == 0:
                     raise HTTPException(
@@ -548,7 +536,7 @@ async def check_omr(
         chunks: list[bytes] = []
         total = 0
         while True:
-            chunk = await image.read(1024 * 256)  # 256 KB at a time
+            chunk = image.file.read(1024 * 256)  # 256 KB at a time (sync — we're in a threadpool)
             if not chunk:
                 break
             total += len(chunk)
@@ -566,7 +554,8 @@ async def check_omr(
 
         omr_args = {
             "output_dir": str(out_dir),
-            "debug": True,
+            # "debug" ถูกอ่านเฉพาะใน main.py (CLI) — entry_point ไม่ใช้ ใส่ไว้กัน KeyError เฉย ๆ
+            "debug": False,
             "setLayout": False,
             "autoAlign": False,
             "skip_config_table": True,  # skip Rich table when called from API (faster, less log noise)
@@ -688,7 +677,7 @@ def _count_files(path: Path) -> int:
 
 
 @app.delete("/exam/{school_id}/{exam_id}")
-async def delete_exam(school_id: str, exam_id: str):
+def delete_exam(school_id: str, exam_id: str):
     """
     Delete all Checked OMR files for a school's exam (use when exam is deleted in Laravel).
 
@@ -723,7 +712,7 @@ async def delete_exam(school_id: str, exam_id: str):
 
 
 @app.delete("/school/{school_id}")
-async def delete_school(school_id: str):
+def delete_school(school_id: str):
     """
     Delete ALL Checked OMR files for a school (use with caution — when a school is removed/migrated).
 
