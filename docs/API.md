@@ -144,6 +144,7 @@ python3 run_api.py
     รูปแบบ: `[A-Za-z0-9_-]{1,64}` (เช่น `12`, `bkk_school_001`)
   - **exam_id** (**บังคับ**): รหัสแบบทดสอบ/วิชา — Laravel ต้องส่งทุกครั้ง ไม่ส่งจะได้ **HTTP 400** (`detail` อธิบายว่าประมวลผลไม่ได้)  
     รูปแบบ: `[A-Za-z0-9_-]{1,64}` — ใช้จัดเก็บรูป checked และให้สแกนซ้ำของ Roll เดิมทับไฟล์เดิมได้ (ดู Path layout)
+  - **require_roll** (optional): `true`/`false` (default: `true`) — `false` = **ข้าม Roll validation** สำหรับ exam โหมด anonymous (ตรวจคะแนนอย่างเดียว นักเรียนไม่ฝนรหัส) กระดาษที่ Roll ว่าง/ไม่ครบจะตรวจผ่านได้ปกติ และรูป checked จะเก็บแบบ `<YYYY-MM>/<uuid>_<ชื่อไฟล์>.jpg` (ไม่ใช่ by-roll)
 - **Response:** JSON
   - `request_id`, `file_id`, `score`, `responses` (Roll, q1, q2, …), `evaluation` (รายละเอียดข้อละข้อ ถ้ามีการคิดคะแนน)
   - `checked_omr_path` (ถ้ามี): path ภายใต้โปรเจกต์ เช่น `outputs/scans/CheckedOMRs/school/12/42/by-roll/12345.jpg`

@@ -435,6 +435,13 @@ def check_omr(
         None,
         description="Required. Exam identifier from Laravel. Same school+exam+Roll → same checked image path.",
     ),
+    require_roll: bool = Form(
+        True,
+        description=(
+            "When false, skip Roll (student ID) validation — for anonymous/grade-only exams "
+            "where students don't bubble a student code. Default true (backward compatible)."
+        ),
+    ),
 ):
     """
     Upload an OMR sheet image. Returns responses (Roll, q1, q2, ...).
@@ -443,6 +450,8 @@ def check_omr(
     - If evaluate=false and no evaluation JSON: raw responses only; Laravel can compute score.
     - exam_id (required): Laravel must send every time; checked OMR paths are under school/<school_id>/<exam_id>/...
     - school_id (optional): defaults to _unknown if omitted.
+    - require_roll (optional, default true): false = ข้าม Roll validation สำหรับ exam โหมด anonymous
+      (ตรวจคะแนนอย่างเดียว ไม่ผูกนักเรียน) — Roll ที่อ่านได้จะยังอยู่ใน responses แต่ไม่ถูกบังคับรูปแบบ
 
     Sync `def` (ไม่ใช่ async) โดยตั้งใจ — FastAPI จะรันใน threadpool ทำให้งาน OpenCV
     ที่กิน CPU หนักไม่ block event loop (ไม่งั้น /health และ request อื่นค้างทั้งหมด)
@@ -597,7 +606,9 @@ def check_omr(
                     score = None
 
         template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
-        _validate_roll_if_configured(template_for_roll, row)
+        # โหมด anonymous (require_roll=false): ไม่บังคับ Roll — นักเรียนไม่ฝนรหัส ใบยังตรวจได้ปกติ
+        if require_roll:
+            _validate_roll_if_configured(template_for_roll, row)
 
         # Build responses dict from template columns (file_id, input_path, output_path, score, then Roll, q1, ...)
         response_cols = [c for c in df.columns if c not in ("file_id", "input_path", "output_path", "score")]
