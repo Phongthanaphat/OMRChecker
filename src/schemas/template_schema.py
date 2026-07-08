@@ -90,6 +90,9 @@ TEMPLATE_SCHEMA = {
                                     "additionalProperties": False,
                                     "properties": {
                                         "apply_erode_subtract": {"type": "boolean"},
+                                        "fallback_marker_rescale_range": two_positive_numbers,
+                                        "fallback_marker_rescale_steps": {"type": "number"},
+                                        "marker_rescale_fallback": {"type": "boolean"},
                                         "marker_rescale_range": two_positive_numbers,
                                         "marker_rescale_steps": {"type": "number"},
                                         "max_matching_variation": {"type": "number"},
