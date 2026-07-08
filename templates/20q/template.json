@@ -1,40 +1,79 @@
 {
-  "pageDimensions": [1748, 2480],
-  "bubbleDimensions": [45, 45],
+  "pageDimensions": [
+    1748,
+    2480
+  ],
+  "bubbleDimensions": [
+    45,
+    45
+  ],
   "customLabels": {
-    "Roll": ["roll1", "roll2", "roll3", "roll4", "roll5"]
+    "Roll": [
+      "roll1",
+      "roll2",
+      "roll3",
+      "roll4",
+      "roll5"
+    ]
   },
   "fieldBlocks": {
     "Roll": {
-      "origin": [190,620],
+      "origin": [
+        190,
+        620
+      ],
       "bubblesGap": 72.5,
       "labelsGap": 76,
-      "fieldLabels": ["roll1", "roll2", "roll3", "roll4", "roll5"],
+      "fieldLabels": [
+        "roll1",
+        "roll2",
+        "roll3",
+        "roll4",
+        "roll5"
+      ],
       "fieldType": "QTYPE_INT"
     },
     "q01block": {
-      "origin": [700, 620],
+      "origin": [
+        700,
+        620
+      ],
       "bubblesGap": 75.5,
       "labelsGap": 72.5,
-      "fieldLabels": ["q1..10"],
+      "fieldLabels": [
+        "q1..10"
+      ],
       "fieldType": "QTYPE_MCQ5"
     },
-    "q02block": { 
-      "origin": [1235, 620],
+    "q02block": {
+      "origin": [
+        1235,
+        620
+      ],
       "bubblesGap": 75.5,
       "labelsGap": 72.5,
-      "fieldLabels": ["q11..20"],
+      "fieldLabels": [
+        "q11..20"
+      ],
       "fieldType": "QTYPE_MCQ5"
     }
   },
   "preProcessors": [
     {
+      "name": "FeatureBasedAlignment",
+      "options": {
+        "reference": "reference.png",
+        "maxFeatures": 1000,
+        "goodMatchPercent": 0.15
+      }
+    },
+    {
       "name": "CropOnMarkers",
       "options": {
         "relativePath": "omr_marker.jpg",
         "sheetToMarkerWidthRatio": 17,
-        "min_matching_threshold": 0.45,
-        "max_matching_variation": 0.40
+        "min_matching_threshold": 0.6,
+        "max_matching_variation": 0.4
       }
     }
   ]

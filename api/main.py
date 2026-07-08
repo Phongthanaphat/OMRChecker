@@ -370,7 +370,8 @@ def _get_cached_template_files(template_id: str, template_dir: Path | None = Non
     if template_dir is None:
         template_dir = get_template_dir(template_id)
     out: dict[str, bytes] = {}
-    for name in ("template.json", "config.json", "omr_marker.jpg"):
+    # reference.png = ภาพต้นฉบับสะอาดสำหรับ FeatureBasedAlignment (ถ้า template ใช้)
+    for name in ("template.json", "config.json", "omr_marker.jpg", "reference.png"):
         src = template_dir / name
         if src.exists():
             out[name] = src.read_bytes()

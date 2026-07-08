@@ -55,6 +55,11 @@ class FeatureBasedAlignment(ImagePreprocessor):
         # Detect ORB features and compute descriptors.
         from_keypoints, from_descriptors = self.orb.detectAndCompute(image, None)
 
+        # Graceful fallback: ภาพไม่มี feature พอ (เช่น ภาพเปล่า/มืด) → คืนภาพเดิม
+        # ให้ CropOnMarkers ตัดสินต่อ (ได้ error message เรื่อง marker ที่ชัดกว่า 500)
+        if from_descriptors is None or self.to_descriptors is None:
+            return image
+
         # Match features.
         matcher = cv2.DescriptorMatcher_create(
             cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING
@@ -87,12 +92,20 @@ class FeatureBasedAlignment(ImagePreprocessor):
             points1[i, :] = from_keypoints[match.queryIdx].pt
             points2[i, :] = self.to_keypoints[match.trainIdx].pt
 
+        # Graceful fallback: match น้อยเกินกว่าจะหา homography ได้ → คืนภาพเดิม
+        if len(matches) < 4:
+            return image
+
         # Find homography
         height, width = self.ref_img.shape
         if self.transform_2_d:
             m, _inliers = cv2.estimateAffine2D(points1, points2)
+            if m is None:
+                return image
             return cv2.warpAffine(image, m, (width, height))
 
         # Use homography
         h, _mask = cv2.findHomography(points1, points2, cv2.RANSAC)
+        if h is None:
+            return image
         return cv2.warpPerspective(image, h, (width, height))
