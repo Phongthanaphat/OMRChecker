@@ -97,6 +97,7 @@ TEMPLATE_SCHEMA = {
                                         "marker_rescale_steps": {"type": "number"},
                                         "max_matching_variation": {"type": "number"},
                                         "min_matching_threshold": {"type": "number"},
+                                        "min_quadrant_matching_threshold": {"type": "number"},
                                         "relativePath": {"type": "string"},
                                         "sheetToMarkerWidthRatio": {"type": "number"},
                                     },

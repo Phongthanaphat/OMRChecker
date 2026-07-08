@@ -38,6 +38,10 @@ class CropOnMarkers(ImagePreprocessor):
         # ต้องเจอ marker ชัดทั้ง 4 มุม ถ้ามุมใดมุมหนึ่งไม่ถึง threshold = ไม่ตรวจ (return None)
         # ค่า 0.5: เฉพาะกระดาษ OMR จริงที่มีวง marker ชัดถึงผ่าน; รูปอื่น (ถ่ายคน ฯลฯ) จะไม่ผ่าน
         self.min_matching_threshold = marker_ops.get("min_matching_threshold", 0.5)
+        self.min_quadrant_matching_threshold = marker_ops.get(
+            "min_quadrant_matching_threshold",
+            self.min_matching_threshold,
+        )
         # ความต่างของความเข้ม match ระหว่าง 4 มุมต้องไม่เกินนี้ (ให้ครบ 4 มุมเหมือนกัน)
         self.max_matching_variation = marker_ops.get("max_matching_variation", 0.35)
         self.marker_rescale_range = tuple(
@@ -127,7 +131,7 @@ class CropOnMarkers(ImagePreprocessor):
             max_t = res.max()
             quarter_match_log += f"Quarter{str(k + 1)}: {str(round(max_t, 3))}\t"
             if (
-                max_t < self.min_matching_threshold
+                max_t < self.min_quadrant_matching_threshold
                 or abs(to_scalar(all_max_t) - to_scalar(max_t)) >= self.max_matching_variation
             ):
                 print(
@@ -136,7 +140,7 @@ class CropOnMarkers(ImagePreprocessor):
                     f"quad={k + 1} "
                     f"quad_match={round(float(max_t), 4)} "
                     f"best_match={round(float(all_max_t), 4)} "
-                    f"min_threshold={self.min_matching_threshold} "
+                    f"min_threshold={self.min_quadrant_matching_threshold} "
                     f"max_variation={self.max_matching_variation}",
                     flush=True,
                 )
