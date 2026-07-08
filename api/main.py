@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import cast
 
 import cv2  # pyright: ignore[reportMissingImports]
@@ -457,6 +458,16 @@ def check_omr(
     Sync `def` (ไม่ใช่ async) โดยตั้งใจ — FastAPI จะรันใน threadpool ทำให้งาน OpenCV
     ที่กิน CPU หนักไม่ block event loop (ไม่งั้น /health และ request อื่นค้างทั้งหมด)
     """
+    timing_started_at = perf_counter()
+    timing_stage_started_at = timing_started_at
+    timings_ms: dict[str, float] = {}
+
+    def mark_timing(name: str) -> None:
+        nonlocal timing_stage_started_at
+        now = perf_counter()
+        timings_ms[name] = round((now - timing_stage_started_at) * 1000, 2)
+        timing_stage_started_at = now
+
     if not image.filename:
         raise HTTPException(status_code=400, detail="No filename")
     ext = Path(image.filename).suffix.lower()
@@ -482,6 +493,7 @@ def check_omr(
     request_id = str(uuid.uuid4())
     work_dir = Path(tempfile.gettempdir()) / f"omr_{request_id}"
     out_dir = Path(tempfile.gettempdir()) / f"omr_out_{request_id}"
+    upload_bytes = 0
 
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -540,6 +552,7 @@ def check_omr(
             if src.exists():
                 shutil.copy2(src, work_dir / "evaluation.json")
         has_evaluation = (work_dir / "evaluation.json").exists()
+        mark_timing("prepare")
 
         # Save uploaded image (with size limit to avoid memory/CPU abuse)
         upload_path = scans_dir / f"upload{ext}"
@@ -557,7 +570,9 @@ def check_omr(
                 )
             chunks.append(chunk)
         content = b"".join(chunks)
+        upload_bytes = total
         upload_path.write_bytes(content)
+        mark_timing("read_upload")
 
         # Run OMR in-process (no subprocess = much faster, no Python startup per request)
         from src.entry import entry_point
@@ -575,6 +590,7 @@ def check_omr(
         except ValueError as e:
             # e.g. empty string / null in answers_in_order from Laravel evaluation JSON
             raise HTTPException(status_code=400, detail=str(e)) from e
+        mark_timing("entry_point")
 
         # Results CSV มีเมื่อ OMR ผ่าน marker check (เจอ marker ครบทั้ง 4 มุม)
         # ถ้าไม่เจอ marker แม้แต่มุมเดียว → CropOnMarkers return None → ไฟล์ไป ErrorFiles → ไม่มีแถวใน Results
@@ -625,6 +641,7 @@ def check_omr(
                     evaluation_rows = edf.to_dict(orient="records")
                 except Exception:
                     pass
+        mark_timing("parse_results")
 
         # Copy checked OMR image to persistent folder.
         # When template defines Roll and the read Roll is digits-only: use .../by-roll/{roll}.jpg
@@ -653,6 +670,7 @@ def check_omr(
                 checked_omr_filename = "/".join(rel_parts)
             except OSError:
                 pass
+        mark_timing("persist_checked_image")
 
         payload = {
             "request_id": request_id,
@@ -668,6 +686,16 @@ def check_omr(
             payload["evaluation"] = evaluation_rows
         elif score is not None:
             payload["score"] = score
+        timings_ms["total"] = round((perf_counter() - timing_started_at) * 1000, 2)
+        logger.info(
+            "[OMR API timing] request_id=%s template_id=%s school_id=%s exam_id=%s upload_bytes=%s timings_ms=%s",
+            request_id,
+            template_id,
+            school_id,
+            exam_id,
+            upload_bytes,
+            timings_ms,
+        )
 
         return JSONResponse(status_code=200, content=payload)
 
