@@ -117,6 +117,14 @@ class CropOnMarkers(ImagePreprocessor):
                 self.fallback_marker_rescale_steps,
             )
         if best_scale is None:
+            print(
+                "[OMR marker failure] "
+                f"reason=scale_search "
+                f"best_match={round(float(all_max_t), 4)} "
+                f"min_threshold={self.min_matching_threshold} "
+                f"used_fallback={used_fallback}",
+                flush=True,
+            )
             if config.outputs.show_image_level >= 1:
                 InteractionUtils.show("Quads", image_eroded_sub, config=config)
             return None
