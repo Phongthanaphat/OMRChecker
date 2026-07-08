@@ -9,7 +9,7 @@
 import os
 from csv import QUOTE_NONNUMERIC
 from pathlib import Path
-from time import time
+from time import perf_counter, time
 
 import cv2
 import pandas as pd
@@ -210,6 +210,17 @@ def process_files(
     outputs_namespace,
 ):
     start_time = int(time())
+    timing_started_at = perf_counter()
+    timing_stage_started_at = timing_started_at
+    timings_ms: dict[str, float] = {}
+
+    def mark_timing(name: str) -> None:
+        nonlocal timing_stage_started_at
+        now = perf_counter()
+        elapsed_ms = round((now - timing_stage_started_at) * 1000, 2)
+        timings_ms[name] = round(timings_ms.get(name, 0) + elapsed_ms, 2)
+        timing_stage_started_at = now
+
     files_counter = 0
     STATS.files_not_moved = 0
 
@@ -218,6 +229,7 @@ def process_files(
         file_name = file_path.name
 
         in_omr = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
+        mark_timing("read_image")
 
         logger.info("")
         logger.info(
@@ -231,6 +243,7 @@ def process_files(
         in_omr = template.image_instance_ops.apply_preprocessors(
             file_path, in_omr, template
         )
+        mark_timing("preprocess")
 
         if in_omr is None:
             # Error OMR case
@@ -252,6 +265,7 @@ def process_files(
                     header=False,
                     index=False,
                 )
+            mark_timing("write_error")
             continue
 
         # uniquify
@@ -269,10 +283,12 @@ def process_files(
             save_dir=save_dir,
             evaluation_config=evaluation_config,
         )
+        mark_timing("read_response")
 
         # TODO: move inner try catch here
         # concatenate roll nos, set unmarked responses, etc
         omr_response = get_concatenated_response(response_dict, template)
+        mark_timing("concatenate_response")
 
         if (
             evaluation_config is None
@@ -289,10 +305,12 @@ def process_files(
                 file_path,
                 outputs_namespace.paths.evaluation_dir,
             )
+            mark_timing("evaluate")
             logger.info(
                 f"(/{files_counter}) Graded with score: {round(score, 2)}\t for file: '{file_id}'"
             )
         else:
+            mark_timing("evaluate")
             logger.info(f"(/{files_counter}) Processed file: '{file_id}'")
 
         if tuning_config.outputs.show_image_level >= 2:
@@ -325,6 +343,7 @@ def process_files(
                 header=False,
                 index=False,
             )
+            mark_timing("write_results")
         else:
             # multi_marked file
             logger.info(f"[{files_counter}] Found multi-marked file: '{file_id}'")
@@ -338,9 +357,25 @@ def process_files(
                     header=False,
                     index=False,
                 )
+            mark_timing("write_results")
             # else:
             #     TODO:  Add appropriate record handling here
             #     pass
+
+    timings_ms["total"] = round((perf_counter() - timing_started_at) * 1000, 2)
+    print(
+        "[OMR entry timing] "
+        f"files={files_counter} "
+        f"read_image_ms={timings_ms.get('read_image', 0)} "
+        f"preprocess_ms={timings_ms.get('preprocess', 0)} "
+        f"read_response_ms={timings_ms.get('read_response', 0)} "
+        f"concatenate_response_ms={timings_ms.get('concatenate_response', 0)} "
+        f"evaluate_ms={timings_ms.get('evaluate', 0)} "
+        f"write_results_ms={timings_ms.get('write_results', 0)} "
+        f"write_error_ms={timings_ms.get('write_error', 0)} "
+        f"total_ms={timings_ms.get('total')}",
+        flush=True,
+    )
 
     print_stats(start_time, files_counter, tuning_config)
 

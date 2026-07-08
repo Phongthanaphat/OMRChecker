@@ -64,6 +64,11 @@ if not INTERNAL_API_KEY and not _env_flag("OMR_ALLOW_NO_AUTH", False):
     )
 
 
+_ENTRY_IMPORT_STARTED_AT = perf_counter()
+from src.entry import entry_point
+ENTRY_IMPORT_MS = round((perf_counter() - _ENTRY_IMPORT_STARTED_AT) * 1000, 2)
+
+
 # API docs exposure toggle.
 # Production recommendation: OMR_ENABLE_DOCS=false to disable /docs, /redoc, /openapi.json.
 ENABLE_DOCS = _env_flag("OMR_ENABLE_DOCS", True)
@@ -380,6 +385,28 @@ def _get_cached_template_files(template_id: str, template_dir: Path | None = Non
     return out
 
 
+@app.on_event("startup")
+def warmup_omr_worker() -> None:
+    """Warm per-worker imports and template files before the first real scan."""
+    started_at = perf_counter()
+    warmed_templates: list[str] = []
+    if TEMPLATES_DIR.is_dir():
+        for template_dir in sorted(TEMPLATES_DIR.iterdir()):
+            if not template_dir.is_dir() or not (template_dir / "template.json").is_file():
+                continue
+            _get_cached_template_files(template_dir.name, template_dir)
+            warmed_templates.append(template_dir.name)
+
+    print(
+        "[OMR API warmup] "
+        f"entry_import_ms={ENTRY_IMPORT_MS} "
+        f"templates={','.join(warmed_templates) or '-'} "
+        f"template_cache_count={len(_template_file_cache)} "
+        f"total_ms={round((perf_counter() - started_at) * 1000, 2)}",
+        flush=True,
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc):
     """Return JSON for any uncaught exception (e.g. timeout). Custom logger has no .exception()."""
@@ -575,8 +602,6 @@ def check_omr(
         mark_timing("read_upload")
 
         # Run OMR in-process (no subprocess = much faster, no Python startup per request)
-        from src.entry import entry_point
-
         omr_args = {
             "output_dir": str(out_dir),
             # "debug" ถูกอ่านเฉพาะใน main.py (CLI) — entry_point ไม่ใช้ ใส่ไว้กัน KeyError เฉย ๆ
