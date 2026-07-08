@@ -130,6 +130,16 @@ class CropOnMarkers(ImagePreprocessor):
                 max_t < self.min_matching_threshold
                 or abs(to_scalar(all_max_t) - to_scalar(max_t)) >= self.max_matching_variation
             ):
+                print(
+                    "[OMR marker failure] "
+                    f"reason=quad_threshold "
+                    f"quad={k + 1} "
+                    f"quad_match={round(float(max_t), 4)} "
+                    f"best_match={round(float(all_max_t), 4)} "
+                    f"min_threshold={self.min_matching_threshold} "
+                    f"max_variation={self.max_matching_variation}",
+                    flush=True,
+                )
                 logger.error(
                     file_path,
                     "\nError: No circle found in Quad",
