@@ -73,7 +73,18 @@
         "relativePath": "omr_marker.jpg",
         "sheetToMarkerWidthRatio": 17,
         "min_matching_threshold": 0.6,
-        "max_matching_variation": 0.4
+        "max_matching_variation": 0.4,
+        "marker_rescale_range": [
+          80,
+          106
+        ],
+        "marker_rescale_steps": 5,
+        "fallback_marker_rescale_range": [
+          35,
+          100
+        ],
+        "fallback_marker_rescale_steps": 10,
+        "marker_rescale_fallback": true
       }
     }
   ]

@@ -44,6 +44,11 @@ class CropOnMarkers(ImagePreprocessor):
             int(r) for r in marker_ops.get("marker_rescale_range", (35, 100))
         )
         self.marker_rescale_steps = int(marker_ops.get("marker_rescale_steps", 10))
+        self.marker_rescale_fallback = bool(marker_ops.get("marker_rescale_fallback", True))
+        self.fallback_marker_rescale_range = tuple(
+            int(r) for r in marker_ops.get("fallback_marker_rescale_range", (35, 100))
+        )
+        self.fallback_marker_rescale_steps = int(marker_ops.get("fallback_marker_rescale_steps", 10))
         self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
         self.marker = self.load_marker(marker_ops, config)
 
@@ -86,6 +91,23 @@ class CropOnMarkers(ImagePreprocessor):
         image_eroded_sub[midh : midh + 2, :] = DEFAULT_WHITE_COLOR
 
         best_scale, all_max_t = self.getBestMatch(image_eroded_sub)
+        if (
+            best_scale is None
+            and self.marker_rescale_fallback
+            and (
+                self.marker_rescale_range != self.fallback_marker_rescale_range
+                or self.marker_rescale_steps != self.fallback_marker_rescale_steps
+            )
+        ):
+            logger.info(
+                "Marker fast scale search failed; retrying fallback range:",
+                self.fallback_marker_rescale_range,
+            )
+            best_scale, all_max_t = self.getBestMatch(
+                image_eroded_sub,
+                self.fallback_marker_rescale_range,
+                self.fallback_marker_rescale_steps,
+            )
         if best_scale is None:
             if config.outputs.show_image_level >= 1:
                 InteractionUtils.show("Quads", image_eroded_sub, config=config)
@@ -232,18 +254,21 @@ class CropOnMarkers(ImagePreprocessor):
 
     # Resizing the marker within scaleRange at rate of descent_per_step to
     # find the best match.
-    def getBestMatch(self, image_eroded_sub):
+    def getBestMatch(self, image_eroded_sub, marker_rescale_range=None, marker_rescale_steps=None):
         config = self.tuning_config
+        marker_rescale_range = marker_rescale_range or self.marker_rescale_range
+        marker_rescale_steps = marker_rescale_steps or self.marker_rescale_steps
         descent_per_step = (
-            self.marker_rescale_range[1] - self.marker_rescale_range[0]
-        ) // self.marker_rescale_steps
+            marker_rescale_range[1] - marker_rescale_range[0]
+        ) // marker_rescale_steps
+        descent_per_step = max(1, descent_per_step)
         _h, _w = self.marker.shape[:2]
         res, best_scale = None, None
         all_max_t = 0
 
         for r0 in np.arange(
-            self.marker_rescale_range[1],
-            self.marker_rescale_range[0],
+            marker_rescale_range[1],
+            marker_rescale_range[0],
             -1 * descent_per_step,
         ):  # reverse order
             s = float(r0 * 1 / 100)
@@ -273,6 +298,6 @@ class CropOnMarkers(ImagePreprocessor):
 
         if best_scale is None:
             logger.warning(
-                "No matchings for given scaleRange:", self.marker_rescale_range
+                "No matchings for given scaleRange:", marker_rescale_range
             )
         return best_scale, all_max_t
