@@ -1,5 +1,7 @@
 import os
 from collections import defaultdict
+from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import cv2
@@ -33,16 +35,32 @@ class ImageInstanceOps:
 
     def apply_preprocessors(self, file_path, in_omr, template):
         tuning_config = self.tuning_config
+        timings_ms = {}
+        started_at = perf_counter()
         # resize to conform to template
         in_omr = ImageUtils.resize_util(
             in_omr,
             tuning_config.dimensions.processing_width,
             tuning_config.dimensions.processing_height,
         )
+        timings_ms["resize"] = round((perf_counter() - started_at) * 1000, 2)
 
         # run pre_processors in sequence
         for pre_processor in template.pre_processors:
+            processor_started_at = perf_counter()
             in_omr = pre_processor.apply_filter(in_omr, file_path)
+            timings_ms[pre_processor.__class__.__name__] = round(
+                (perf_counter() - processor_started_at) * 1000, 2
+            )
+            if in_omr is None:
+                break
+        timings_ms["total"] = round((perf_counter() - started_at) * 1000, 2)
+        print(
+            "[OMR preprocess timing] "
+            f"file={Path(file_path).name} "
+            + " ".join(f"{name}_ms={value}" for name, value in timings_ms.items()),
+            flush=True,
+        )
         return in_omr
 
     def read_omr_response(self, template, image, name, save_dir=None, evaluation_config=None):

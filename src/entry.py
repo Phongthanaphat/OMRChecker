@@ -38,7 +38,14 @@ def entry_point(input_dir, args):
     if not os.path.exists(input_dir):
         raise Exception(f"Given input directory does not exist: '{input_dir}'")
     curr_dir = input_dir
-    return process_dir(input_dir, curr_dir, args)
+    started_at = perf_counter()
+    result = process_dir(input_dir, curr_dir, args)
+    print(
+        "[OMR entry_point timing] "
+        f"total_ms={round((perf_counter() - started_at) * 1000, 2)}",
+        flush=True,
+    )
+    return result
 
 
 def print_config_summary(
@@ -84,10 +91,21 @@ def process_dir(
     tuning_config=CONFIG_DEFAULTS,
     evaluation_config=None,
 ):
+    timing_started_at = perf_counter()
+    timing_stage_started_at = timing_started_at
+    timings_ms: dict[str, float] = {}
+
+    def mark_timing(name: str) -> None:
+        nonlocal timing_stage_started_at
+        now = perf_counter()
+        timings_ms[name] = round((now - timing_stage_started_at) * 1000, 2)
+        timing_stage_started_at = now
+
     # Update local tuning_config (in current recursion stack)
     local_config_path = curr_dir.joinpath(CONFIG_FILENAME)
     if os.path.exists(local_config_path):
         tuning_config = open_config_with_defaults(local_config_path)
+    mark_timing("open_config")
 
     # Update local template (in current recursion stack)
     local_template_path = curr_dir.joinpath(TEMPLATE_FILENAME)
@@ -97,6 +115,7 @@ def process_dir(
             local_template_path,
             tuning_config,
         )
+    mark_timing("template")
     # Look for subdirectories for processing
     subdirs = [d for d in curr_dir.iterdir() if d.is_dir()]
 
@@ -112,6 +131,7 @@ def process_dir(
     if template:
         for pp in template.pre_processors:
             excluded_files.extend(Path(p) for p in pp.exclude_files())
+    mark_timing("discover_files")
 
     local_evaluation_path = curr_dir.joinpath(EVALUATION_FILENAME)
     if not args["setLayout"] and os.path.exists(local_evaluation_path):
@@ -129,6 +149,7 @@ def process_dir(
         excluded_files.extend(
             Path(exclude_file) for exclude_file in evaluation_config.get_exclude_files()
         )
+    mark_timing("evaluation_config")
 
     omr_files = [f for f in omr_files if f not in excluded_files]
 
@@ -145,6 +166,7 @@ def process_dir(
 
         setup_dirs_for_paths(paths)
         outputs_namespace = setup_outputs_for_template(paths, template)
+        mark_timing("setup_outputs")
 
         if not args.get("skip_config_table"):
             print_config_summary(
@@ -166,6 +188,7 @@ def process_dir(
                 evaluation_config,
                 outputs_namespace,
             )
+        mark_timing("process_files")
 
     elif not subdirs:
         # Each subdirectory should have images or should be non-leaf
@@ -184,6 +207,20 @@ def process_dir(
             tuning_config,
             evaluation_config,
         )
+
+    timings_ms["total"] = round((perf_counter() - timing_started_at) * 1000, 2)
+    print(
+        "[OMR process_dir timing] "
+        f"dir={curr_dir.name} "
+        f"open_config_ms={timings_ms.get('open_config', 0)} "
+        f"template_ms={timings_ms.get('template', 0)} "
+        f"discover_files_ms={timings_ms.get('discover_files', 0)} "
+        f"evaluation_config_ms={timings_ms.get('evaluation_config', 0)} "
+        f"setup_outputs_ms={timings_ms.get('setup_outputs', 0)} "
+        f"process_files_ms={timings_ms.get('process_files', 0)} "
+        f"total_ms={timings_ms.get('total')}",
+        flush=True,
+    )
 
 
 def show_template_layouts(omr_files, template, tuning_config):
