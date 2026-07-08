@@ -109,7 +109,7 @@
         "relativePath": "omr_marker.jpg",
         "sheetToMarkerWidthRatio": 17,
         "min_matching_threshold": 0.6,
-        "min_quadrant_matching_threshold": 0.42,
+        "min_quadrant_matching_threshold": 0.36,
         "max_matching_variation": 0.4,
         "marker_rescale_range": [
           50,
