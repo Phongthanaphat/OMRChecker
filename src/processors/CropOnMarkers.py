@@ -90,6 +90,7 @@ class CropOnMarkers(ImagePreprocessor):
         image_eroded_sub[:, midw : midw + 2] = DEFAULT_WHITE_COLOR
         image_eroded_sub[midh : midh + 2, :] = DEFAULT_WHITE_COLOR
 
+        used_fallback = False
         best_scale, all_max_t = self.getBestMatch(image_eroded_sub)
         if (
             best_scale is None
@@ -103,6 +104,7 @@ class CropOnMarkers(ImagePreprocessor):
                 "Marker fast scale search failed; retrying fallback range:",
                 self.fallback_marker_rescale_range,
             )
+            used_fallback = True
             best_scale, all_max_t = self.getBestMatch(
                 image_eroded_sub,
                 self.fallback_marker_rescale_range,
@@ -181,6 +183,13 @@ class CropOnMarkers(ImagePreprocessor):
 
         logger.info(quarter_match_log)
         logger.info(f"Optimal Scale: {best_scale}")
+        print(
+            "[OMR marker scale] "
+            f"best_scale={best_scale} "
+            f"match={round(float(all_max_t), 4)} "
+            f"used_fallback={used_fallback}",
+            flush=True,
+        )
         # analysis data
         self.threshold_circles.append(sum_t / 4)
 

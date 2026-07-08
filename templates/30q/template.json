@@ -87,15 +87,15 @@
         "min_matching_threshold": 0.6,
         "max_matching_variation": 0.4,
         "marker_rescale_range": [
-          80,
+          60,
           106
         ],
-        "marker_rescale_steps": 5,
+        "marker_rescale_steps": 8,
         "fallback_marker_rescale_range": [
           35,
-          100
+          60
         ],
-        "fallback_marker_rescale_steps": 10,
+        "fallback_marker_rescale_steps": 5,
         "marker_rescale_fallback": true
       }
     }
