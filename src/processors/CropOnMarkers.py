@@ -22,6 +22,8 @@ from src.utils.image import ImageUtils
 from src.utils.interaction import InteractionUtils
 from src.utils.numeric import to_scalar
 
+_MARKER_CACHE = {}
+
 
 class CropOnMarkers(ImagePreprocessor):
     def __init__(self, *args, **kwargs):
@@ -245,6 +247,16 @@ class CropOnMarkers(ImagePreprocessor):
             )
             exit(31)
 
+        cache_key = (
+            os.path.abspath(self.marker_path),
+            int(config.dimensions.processing_width),
+            int(marker_ops.get("sheetToMarkerWidthRatio", 0) or 0),
+            bool(self.apply_erode_subtract),
+        )
+        cached = _MARKER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
         marker = cv2.imread(self.marker_path, cv2.IMREAD_GRAYSCALE)
 
         if "sheetToMarkerWidthRatio" in marker_ops:
@@ -273,6 +285,7 @@ class CropOnMarkers(ImagePreprocessor):
                 iterations=EROSION_PARAMS["iterations"],
             )
 
+        _MARKER_CACHE[cache_key] = marker.copy()
         return marker
 
     # Resizing the marker within scaleRange at rate of descent_per_step to

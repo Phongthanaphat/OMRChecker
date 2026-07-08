@@ -13,6 +13,8 @@ from src.constants.image_processing import (
     DEFAULT_GOOD_MATCH_PERCENT
 )
 
+_REFERENCE_CACHE = {}
+
 
 class FeatureBasedAlignment(ImagePreprocessor):
     def __init__(self, *args, **kwargs):
@@ -22,21 +24,31 @@ class FeatureBasedAlignment(ImagePreprocessor):
 
         # process reference image
         self.ref_path = self.relative_dir.joinpath(options["reference"])
-        ref_img = cv2.imread(str(self.ref_path), cv2.IMREAD_GRAYSCALE)
-        self.ref_img = ImageUtils.resize_util(
-            ref_img,
-            config.dimensions.processing_width,
-            config.dimensions.processing_height,
-        )
         # get options with defaults
         self.max_features = int(options.get("maxFeatures", DEFAULT_MAX_FEATURES))
         self.good_match_percent = options.get("goodMatchPercent", DEFAULT_GOOD_MATCH_PERCENT)
         self.transform_2_d = options.get("2d", False)
-        # Extract keypoints and description of source image
         self.orb = cv2.ORB_create(self.max_features)
-        self.to_keypoints, self.to_descriptors = self.orb.detectAndCompute(
-            self.ref_img, None
+
+        cache_key = (
+            str(self.ref_path.resolve()),
+            int(config.dimensions.processing_width),
+            int(config.dimensions.processing_height),
+            self.max_features,
         )
+        cached = _REFERENCE_CACHE.get(cache_key)
+        if cached is None:
+            ref_img = cv2.imread(str(self.ref_path), cv2.IMREAD_GRAYSCALE)
+            ref_img = ImageUtils.resize_util(
+                ref_img,
+                config.dimensions.processing_width,
+                config.dimensions.processing_height,
+            )
+            to_keypoints, to_descriptors = self.orb.detectAndCompute(ref_img, None)
+            cached = (ref_img, to_keypoints, to_descriptors)
+            _REFERENCE_CACHE[cache_key] = cached
+
+        self.ref_img, self.to_keypoints, self.to_descriptors = cached
 
     def __str__(self):
         return self.ref_path.name
