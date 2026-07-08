@@ -299,7 +299,7 @@ def _validate_roll_if_configured(template_json: dict, row: pd.Series) -> None:
 
         parsed_keys = parse_fields("Custom Label: Roll", roll_keys)
     except Exception as e:
-        logger.info("Roll validation skipped: cannot parse customLabels.Roll (%s)", e)
+        logger.info(f"Roll validation skipped: cannot parse customLabels.Roll ({e})")
         return
     max_slots = len(parsed_keys)
     roll = str(row.get("Roll", "")).strip()
@@ -687,14 +687,20 @@ def check_omr(
         elif score is not None:
             payload["score"] = score
         timings_ms["total"] = round((perf_counter() - timing_started_at) * 1000, 2)
-        logger.info(
-            "[OMR API timing] request_id=%s template_id=%s school_id=%s exam_id=%s upload_bytes=%s timings_ms=%s",
-            request_id,
-            template_id,
-            school_id,
-            exam_id,
-            upload_bytes,
-            timings_ms,
+        print(
+            "[OMR API timing] "
+            f"request_id={request_id} "
+            f"template_id={template_id} "
+            f"school_id={school_id} "
+            f"exam_id={exam_id} "
+            f"upload_bytes={upload_bytes} "
+            f"prepare_ms={timings_ms.get('prepare')} "
+            f"read_upload_ms={timings_ms.get('read_upload')} "
+            f"entry_point_ms={timings_ms.get('entry_point')} "
+            f"parse_results_ms={timings_ms.get('parse_results')} "
+            f"persist_checked_image_ms={timings_ms.get('persist_checked_image')} "
+            f"total_ms={timings_ms.get('total')}",
+            flush=True,
         )
 
         return JSONResponse(status_code=200, content=payload)
@@ -743,7 +749,7 @@ def delete_exam(school_id: str, exam_id: str):
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e!s}") from e
 
-    logger.info("Deleted exam files: %s/%s (%d files)", school_id, exam_id, files_removed)
+    logger.info(f"Deleted exam files: {school_id}/{exam_id} ({files_removed} files)")
     return {
         "deleted": True,
         "path": path_deleted,
@@ -777,7 +783,7 @@ def delete_school(school_id: str):
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e!s}") from e
 
-    logger.info("Deleted school files: %s (%d files)", school_id, files_removed)
+    logger.info(f"Deleted school files: {school_id} ({files_removed} files)")
     return {
         "deleted": True,
         "path": path_deleted,
