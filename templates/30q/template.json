@@ -56,6 +56,18 @@
         "q11..20"
       ],
       "fieldType": "QTYPE_MCQ5"
+    },
+    "q03block": {
+      "origin": [
+        188,
+        1575
+      ],
+      "bubblesGap": 75.5,
+      "labelsGap": 72.5,
+      "fieldLabels": [
+        "q21..30"
+      ],
+      "fieldType": "QTYPE_MCQ5"
     }
   },
   "preProcessors": [
