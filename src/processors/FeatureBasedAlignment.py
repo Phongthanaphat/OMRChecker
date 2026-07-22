@@ -4,16 +4,19 @@ Credits: https://www.learnopencv.com/image-alignment-feature-based-using-opencv-
 """
 import cv2
 import numpy as np
+from collections import OrderedDict
 
 from src.processors.interfaces.ImagePreprocessor import ImagePreprocessor
 from src.utils.image import ImageUtils
 from src.utils.interaction import InteractionUtils
+from src.utils.cache import file_digest, get_positive_int_env, lru_get, lru_put
 from src.constants.image_processing import (
     DEFAULT_MAX_FEATURES,
     DEFAULT_GOOD_MATCH_PERCENT
 )
 
-_REFERENCE_CACHE = {}
+_REFERENCE_CACHE_MAX = get_positive_int_env("OMR_REFERENCE_CACHE_MAX", 32)
+_REFERENCE_CACHE = OrderedDict()
 
 
 class FeatureBasedAlignment(ImagePreprocessor):
@@ -30,13 +33,14 @@ class FeatureBasedAlignment(ImagePreprocessor):
         self.transform_2_d = options.get("2d", False)
         self.orb = cv2.ORB_create(self.max_features)
 
+        reference_digest = file_digest(self.ref_path)
         cache_key = (
-            str(self.ref_path.resolve()),
+            reference_digest,
             int(config.dimensions.processing_width),
             int(config.dimensions.processing_height),
             self.max_features,
         )
-        cached = _REFERENCE_CACHE.get(cache_key)
+        cached = lru_get(_REFERENCE_CACHE, cache_key)
         if cached is None:
             ref_img = cv2.imread(str(self.ref_path), cv2.IMREAD_GRAYSCALE)
             ref_img = ImageUtils.resize_util(
@@ -46,7 +50,7 @@ class FeatureBasedAlignment(ImagePreprocessor):
             )
             to_keypoints, to_descriptors = self.orb.detectAndCompute(ref_img, None)
             cached = (ref_img, to_keypoints, to_descriptors)
-            _REFERENCE_CACHE[cache_key] = cached
+            lru_put(_REFERENCE_CACHE, cache_key, cached, _REFERENCE_CACHE_MAX)
 
         self.ref_img, self.to_keypoints, self.to_descriptors = cached
 

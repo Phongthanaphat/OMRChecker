@@ -7,10 +7,14 @@ import glob
 import json
 import os
 import re
+import resource
 import secrets
 import shutil
+import struct
+import sys
 import tempfile
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -21,16 +25,22 @@ import pandas as pd  # pyright: ignore[reportMissingImports]
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
+try:
+    _OPENCV_THREADS = max(1, int(os.getenv("OMR_OPENCV_THREADS", "1")))
+except ValueError:
+    _OPENCV_THREADS = 1
+cv2.setNumThreads(_OPENCV_THREADS)
+
 _App = FastAPI
 
 # Project root (parent of api/) – ensure importable when running as uvicorn api.main:app
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 
 from src.logger import logger
+from src.utils.cache import get_positive_int_env, lru_get, lru_put
 DEFAULT_TEMPLATE_ID = "50q"
 
 # Max upload size (20 MB) – reject larger to avoid memory/CPU abuse
@@ -40,7 +50,8 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 
 # Cache template files (template.json, config.json, omr_marker.jpg) per template_id to reduce disk I/O
-_template_file_cache: dict[str, dict[str, bytes]] = {}
+TEMPLATE_FILE_CACHE_MAX = get_positive_int_env("OMR_TEMPLATE_FILE_CACHE_MAX", 32)
+_template_file_cache: OrderedDict[str, dict[str, bytes]] = OrderedDict()
 
 # Internal API key required on every request (global_auth_middleware).
 # Set via OMR_INTERNAL_API_KEY env var.
@@ -53,6 +64,76 @@ def _env_flag(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _current_rss_mb() -> float | None:
+    """Return current RSS in MB when the platform exposes it cheaply."""
+    status_path = Path("/proc/self/status")
+    if status_path.exists():
+        try:
+            for line in status_path.read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return round(int(parts[1]) / 1024, 2)
+        except OSError:
+            pass
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except (OSError, ValueError):
+        return None
+    # Linux reports KiB; macOS reports bytes. /proc above handles production Linux.
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    return round(rss / divisor, 2)
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 4 or data[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    while i + 9 < len(data):
+        while i < len(data) and data[i] == 0xFF:
+            i += 1
+        if i >= len(data):
+            return None
+        marker = data[i]
+        i += 1
+        if marker in {0x01, *range(0xD0, 0xD8)}:
+            continue
+        if i + 2 > len(data):
+            return None
+        segment_length = int.from_bytes(data[i : i + 2], "big")
+        if segment_length < 2 or i + segment_length > len(data):
+            return None
+        if marker in {
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
+        }:
+            height = int.from_bytes(data[i + 3 : i + 5], "big")
+            width = int.from_bytes(data[i + 5 : i + 7], "big")
+            return width, height
+        i += segment_length
+    return None
+
+
+def _image_dimensions_from_header(data: bytes, ext: str) -> tuple[int, int] | None:
+    if ext == ".png" and len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        width, height = struct.unpack(">II", data[16:24])
+        return int(width), int(height)
+    if ext in {".jpg", ".jpeg"}:
+        return _jpeg_dimensions(data)
+    return None
 
 
 # Fail fast: refuse to start with auth disabled unless explicitly opted in for local dev.
@@ -371,8 +452,9 @@ def get_template_dir(template_id: str) -> Path:
 
 def _get_cached_template_files(template_id: str, template_dir: Path | None = None) -> dict[str, bytes]:
     """Load template.json, config.json, omr_marker.jpg into memory; cache per template_id."""
-    if template_id in _template_file_cache:
-        return _template_file_cache[template_id]
+    cached = lru_get(_template_file_cache, template_id)
+    if cached is not None:
+        return cached
     if template_dir is None:
         template_dir = get_template_dir(template_id)
     out: dict[str, bytes] = {}
@@ -381,7 +463,7 @@ def _get_cached_template_files(template_id: str, template_dir: Path | None = Non
         src = template_dir / name
         if src.exists():
             out[name] = src.read_bytes()
-    _template_file_cache[template_id] = out
+    lru_put(_template_file_cache, template_id, out, TEMPLATE_FILE_CACHE_MAX)
     return out
 
 
@@ -488,6 +570,14 @@ def check_omr(
     timing_started_at = perf_counter()
     timing_stage_started_at = timing_started_at
     timings_ms: dict[str, float] = {}
+    request_id = str(uuid.uuid4())
+    worker_pid = os.getpid()
+    rss_before_mb = _current_rss_mb()
+    status_code: int | None = None
+    input_dimensions: tuple[int, int] | None = None
+    work_dir: Path | None = None
+    out_dir: Path | None = None
+    upload_bytes = 0
 
     def mark_timing(name: str) -> None:
         nonlocal timing_stage_started_at
@@ -517,10 +607,8 @@ def check_omr(
     exam_id = cast(str, _safe_id(exam_id, "exam_id"))
 
     template_dir = get_template_dir(template_id)
-    request_id = str(uuid.uuid4())
     work_dir = Path(tempfile.gettempdir()) / f"omr_{request_id}"
     out_dir = Path(tempfile.gettempdir()) / f"omr_out_{request_id}"
-    upload_bytes = 0
 
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -583,22 +671,25 @@ def check_omr(
 
         # Save uploaded image (with size limit to avoid memory/CPU abuse)
         upload_path = scans_dir / f"upload{ext}"
-        chunks: list[bytes] = []
+        header_bytes = bytearray()
         total = 0
-        while True:
-            chunk = image.file.read(1024 * 256)  # 256 KB at a time (sync — we're in a threadpool)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_UPLOAD_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"Image too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.",
-                )
-            chunks.append(chunk)
-        content = b"".join(chunks)
+        with upload_path.open("wb") as out_file:
+            while True:
+                chunk = image.file.read(1024 * 256)  # 256 KB at a time (sync — we're in a threadpool)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Image too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.",
+                    )
+                if len(header_bytes) < 64 * 1024:
+                    remaining = (64 * 1024) - len(header_bytes)
+                    header_bytes.extend(chunk[:remaining])
+                out_file.write(chunk)
         upload_bytes = total
-        upload_path.write_bytes(content)
+        input_dimensions = _image_dimensions_from_header(bytes(header_bytes), ext)
         mark_timing("read_upload")
 
         # Run OMR in-process (no subprocess = much faster, no Python startup per request)
@@ -609,6 +700,7 @@ def check_omr(
             "setLayout": False,
             "autoAlign": False,
             "skip_config_table": True,  # skip Rich table when called from API (faster, less log noise)
+            "single_file": str(upload_path),
         }
         try:
             entry_point(Path(work_dir), omr_args)
@@ -715,10 +807,13 @@ def check_omr(
         print(
             "[OMR API timing] "
             f"request_id={request_id} "
+            f"pid={worker_pid} "
             f"template_id={template_id} "
             f"school_id={school_id} "
             f"exam_id={exam_id} "
             f"upload_bytes={upload_bytes} "
+            f"input_width={input_dimensions[0] if input_dimensions else '-'} "
+            f"input_height={input_dimensions[1] if input_dimensions else '-'} "
             f"prepare_ms={timings_ms.get('prepare')} "
             f"read_upload_ms={timings_ms.get('read_upload')} "
             f"entry_point_ms={timings_ms.get('entry_point')} "
@@ -728,16 +823,45 @@ def check_omr(
             flush=True,
         )
 
+        status_code = 200
         return JSONResponse(status_code=200, content=payload)
 
+    except HTTPException as e:
+        status_code = e.status_code
+        raise
+    except Exception:
+        status_code = 500
+        raise
     finally:
         # Cleanup temp dirs
         for d in (work_dir, out_dir):
-            if d.exists():
+            if d is not None and d.exists():
                 try:
                     shutil.rmtree(d)
                 except OSError:
                     pass
+        rss_after_mb = _current_rss_mb()
+        rss_delta_mb = (
+            round(rss_after_mb - rss_before_mb, 2)
+            if rss_after_mb is not None and rss_before_mb is not None
+            else None
+        )
+        print(
+            "[OMR API diagnostics] "
+            f"request_id={request_id} "
+            f"pid={worker_pid} "
+            f"status={status_code if status_code is not None else '-'} "
+            f"template_id={template_id} "
+            f"upload_bytes={upload_bytes} "
+            f"input_width={input_dimensions[0] if input_dimensions else '-'} "
+            f"input_height={input_dimensions[1] if input_dimensions else '-'} "
+            f"rss_before_mb={rss_before_mb if rss_before_mb is not None else '-'} "
+            f"rss_after_mb={rss_after_mb if rss_after_mb is not None else '-'} "
+            f"rss_delta_mb={rss_delta_mb if rss_delta_mb is not None else '-'} "
+            f"total_ms={round((perf_counter() - timing_started_at) * 1000, 2)} "
+            f"temp_dirs_removed={not any(d is not None and d.exists() for d in (work_dir, out_dir))}",
+            flush=True,
+        )
 
 
 def _count_files(path: Path) -> int:

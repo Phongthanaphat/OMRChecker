@@ -37,15 +37,102 @@ STATS = Stats()
 def entry_point(input_dir, args):
     if not os.path.exists(input_dir):
         raise Exception(f"Given input directory does not exist: '{input_dir}'")
+    input_dir = Path(input_dir)
     curr_dir = input_dir
     started_at = perf_counter()
-    result = process_dir(input_dir, curr_dir, args)
+    if args.get("single_file"):
+        result = process_single_file(input_dir, Path(args["single_file"]), args)
+    else:
+        result = process_dir(input_dir, curr_dir, args)
     print(
         "[OMR entry_point timing] "
         f"total_ms={round((perf_counter() - started_at) * 1000, 2)}",
         flush=True,
     )
     return result
+
+
+def process_single_file(root_dir, file_path, args):
+    timing_started_at = perf_counter()
+    timing_stage_started_at = timing_started_at
+    timings_ms: dict[str, float] = {}
+
+    def mark_timing(name: str) -> None:
+        nonlocal timing_stage_started_at
+        now = perf_counter()
+        timings_ms[name] = round((now - timing_stage_started_at) * 1000, 2)
+        timing_stage_started_at = now
+
+    root_dir = Path(root_dir)
+    file_path = Path(file_path)
+    if not file_path.is_file():
+        raise Exception(f"Given input file does not exist: '{file_path}'")
+
+    local_config_path = root_dir.joinpath(CONFIG_FILENAME)
+    tuning_config = (
+        open_config_with_defaults(local_config_path)
+        if os.path.exists(local_config_path)
+        else CONFIG_DEFAULTS
+    )
+    mark_timing("open_config")
+
+    local_template_path = root_dir.joinpath(TEMPLATE_FILENAME)
+    if not os.path.exists(local_template_path):
+        raise Exception(f"No template file found in the directory tree of {root_dir}")
+    template = Template(local_template_path, tuning_config)
+    mark_timing("template")
+
+    excluded_files = []
+    for pp in template.pre_processors:
+        excluded_files.extend(Path(p) for p in pp.exclude_files())
+    if file_path in excluded_files:
+        raise Exception(f"Input file is excluded by template pre-processors: '{file_path}'")
+    mark_timing("discover_files")
+
+    evaluation_config = None
+    local_evaluation_path = root_dir.joinpath(EVALUATION_FILENAME)
+    if not args["setLayout"] and os.path.exists(local_evaluation_path):
+        evaluation_config = EvaluationConfig(
+            root_dir,
+            local_evaluation_path,
+            template,
+            tuning_config,
+        )
+        excluded_files.extend(
+            Path(exclude_file) for exclude_file in evaluation_config.get_exclude_files()
+        )
+        if file_path in excluded_files:
+            raise Exception(f"Input file is excluded by evaluation config: '{file_path}'")
+    mark_timing("evaluation_config")
+
+    output_dir = Path(args["output_dir"], file_path.parent.relative_to(root_dir))
+    paths = Paths(output_dir)
+    setup_dirs_for_paths(paths)
+    outputs_namespace = setup_outputs_for_template(paths, template)
+    mark_timing("setup_outputs")
+
+    process_files(
+        [file_path],
+        template,
+        tuning_config,
+        evaluation_config,
+        outputs_namespace,
+    )
+    mark_timing("process_files")
+
+    timings_ms["total"] = round((perf_counter() - timing_started_at) * 1000, 2)
+    print(
+        "[OMR single_file timing] "
+        f"file={file_path.name} "
+        f"open_config_ms={timings_ms.get('open_config', 0)} "
+        f"template_ms={timings_ms.get('template', 0)} "
+        f"discover_files_ms={timings_ms.get('discover_files', 0)} "
+        f"evaluation_config_ms={timings_ms.get('evaluation_config', 0)} "
+        f"setup_outputs_ms={timings_ms.get('setup_outputs', 0)} "
+        f"process_files_ms={timings_ms.get('process_files', 0)} "
+        f"total_ms={timings_ms.get('total')}",
+        flush=True,
+    )
 
 
 def print_config_summary(
@@ -267,6 +354,8 @@ def process_files(
 
         in_omr = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
         mark_timing("read_image")
+        if in_omr is None:
+            raise ValueError(f"Unable to read image file: '{file_path}'")
 
         logger.info("")
         logger.info(

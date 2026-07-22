@@ -6,16 +6,20 @@
  Github: https://github.com/Udayraj123
 
 """
+from collections import OrderedDict
+
 import cv2
 import numpy as np
 
 from src.logger import logger
+from src.utils.cache import get_positive_int_env, lru_get, lru_put
 
 # matplotlib imported lazily only when saving/showing images (show_image_level >= 1)
 CLAHE_HELPER = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
 
 # Cache gamma LUTs to avoid rebuilding the same table every frame (same gamma used repeatedly)
-_gamma_lut_cache: dict[float, np.ndarray] = {}
+_GAMMA_LUT_CACHE_MAX = get_positive_int_env("OMR_GAMMA_LUT_CACHE_MAX", 32)
+_gamma_lut_cache: OrderedDict[float, np.ndarray] = OrderedDict()
 
 
 class ImageUtils:
@@ -91,13 +95,15 @@ class ImageUtils:
     def adjust_gamma(image, gamma=1.0):
         # build a lookup table (cached per gamma) mapping [0, 255] to adjusted values
         global _gamma_lut_cache
-        if gamma not in _gamma_lut_cache:
+        cached = lru_get(_gamma_lut_cache, gamma)
+        if cached is None:
             inv_gamma = 1.0 / gamma
-            _gamma_lut_cache[gamma] = np.array(
+            cached = np.array(
                 [((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)],
                 dtype="uint8",
             )
-        return cv2.LUT(image, _gamma_lut_cache[gamma])
+            lru_put(_gamma_lut_cache, gamma, cached, _GAMMA_LUT_CACHE_MAX)
+        return cv2.LUT(image, cached)
 
     @staticmethod
     def four_point_transform(image, pts):

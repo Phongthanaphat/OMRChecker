@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -21,8 +22,10 @@ from src.processors.interfaces.ImagePreprocessor import ImagePreprocessor
 from src.utils.image import ImageUtils
 from src.utils.interaction import InteractionUtils
 from src.utils.numeric import to_scalar
+from src.utils.cache import file_digest, get_positive_int_env, lru_get, lru_put
 
-_MARKER_CACHE = {}
+_MARKER_CACHE_MAX = get_positive_int_env("OMR_MARKER_CACHE_MAX", 32)
+_MARKER_CACHE = OrderedDict()
 
 
 class CropOnMarkers(ImagePreprocessor):
@@ -255,13 +258,14 @@ class CropOnMarkers(ImagePreprocessor):
             )
             exit(31)
 
+        marker_digest = file_digest(self.marker_path)
         cache_key = (
-            os.path.abspath(self.marker_path),
+            marker_digest,
             int(config.dimensions.processing_width),
             int(marker_ops.get("sheetToMarkerWidthRatio", 0) or 0),
             bool(self.apply_erode_subtract),
         )
-        cached = _MARKER_CACHE.get(cache_key)
+        cached = lru_get(_MARKER_CACHE, cache_key)
         if cached is not None:
             return cached.copy()
 
@@ -293,7 +297,7 @@ class CropOnMarkers(ImagePreprocessor):
                 iterations=EROSION_PARAMS["iterations"],
             )
 
-        _MARKER_CACHE[cache_key] = marker.copy()
+        lru_put(_MARKER_CACHE, cache_key, marker.copy(), _MARKER_CACHE_MAX)
         return marker
 
     # Resizing the marker within scaleRange at rate of descent_per_step to

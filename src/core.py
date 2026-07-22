@@ -26,12 +26,11 @@ from src.utils.numeric import to_scalar
 class ImageInstanceOps:
     """Class to hold fine-tuned utilities for a group of images. One instance for each processing directory."""
 
-    save_img_list: Any = defaultdict(list)
-
     def __init__(self, tuning_config):
         super().__init__()
         self.tuning_config = tuning_config
         self.save_image_level = tuning_config.outputs.save_image_level
+        self.save_img_list: Any = defaultdict(list)
 
     def apply_preprocessors(self, file_path, in_omr, template):
         tuning_config = self.tuning_config
@@ -513,8 +512,8 @@ class ImageInstanceOps:
 
             return omr_response, final_marked, multi_marked, multi_roll
 
-        except Exception as e:
-            raise e
+        finally:
+            self.reset_all_save_img()
 
     @staticmethod
     def draw_template_layout(img, template, shifted=True, draw_qvals=False, border=-1):
@@ -819,5 +818,6 @@ class ImageInstanceOps:
             ImageUtils.save_img(f"{save_dir}stack/{name}_{str(key)}_stack.jpg", result)
 
     def reset_all_save_img(self):
+        self.save_img_list.clear()
         for i in range(self.save_image_level):
             self.save_img_list[i + 1] = []

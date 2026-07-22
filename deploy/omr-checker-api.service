@@ -1,11 +1,11 @@
-# OMR Checker API – systemd unit (พร้อม optimize: 4 workers)
+# OMR Checker API – systemd unit (พร้อม optimize: 2 workers)
 # คัดลอกไปที่ /etc/systemd/system/ แล้วแก้ WorkingDirectory / path ของ venv ถ้า deploy ที่ path อื่น
 #
 # โปรเจกต์ Laravel อยู่ที่ /var/www/smhub_web
 # โปรเจกต์ OMR อยู่ที่ /var/www/OMRChecker (คนละโฟลเดอร์)
 #
 # รันที่ 127.0.0.1 = ให้เฉพาะ Laravel บน VPS เรียกได้ (http://127.0.0.1:8080)
-# --workers 4 = รับ request พร้อมกัน 4 งาน (ใช้ RAM ~1.2–2.4 GB)
+# --workers 2 = ค่าแนะนำสำหรับเครื่อง RAM ~10 GB; เพิ่ม worker หลัง benchmark แล้ว memory-safe เท่านั้น
 
 [Unit]
 Description=OMR Checker API (FastAPI on port 8080)
@@ -21,7 +21,7 @@ Environment="PATH=/var/www/OMRChecker/venv/bin"
 # Prefix "-" = ถ้าไม่มีไฟล์ service ยัง start ได้ (dev); เอา "-" ออกถ้าต้องการบังคับให้มีไฟล์
 # หมายเหตุ: ถ้า OMR_INTERNAL_API_KEY ไม่ถูกตั้ง app จะ refuse start เอง (fail-fast)
 EnvironmentFile=-/var/www/OMRChecker/.env
-ExecStart=/var/www/OMRChecker/venv/bin/python3 run_api.py --host 127.0.0.1 --port 8080 --workers 4
+ExecStart=/var/www/OMRChecker/venv/bin/python3 run_api.py --host 127.0.0.1 --port 8080 --workers 2
 Restart=always
 RestartSec=5
 
