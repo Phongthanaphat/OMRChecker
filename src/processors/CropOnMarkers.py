@@ -59,6 +59,9 @@ class CropOnMarkers(ImagePreprocessor):
         )
         self.fallback_marker_rescale_steps = int(marker_ops.get("fallback_marker_rescale_steps", 10))
         self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
+        self.allow_quadrant_scale_fallback = marker_ops.get(
+            "allow_quadrant_scale_fallback", True
+        )
         self.marker = self.load_marker(marker_ops, config)
 
     def __str__(self):
@@ -100,6 +103,7 @@ class CropOnMarkers(ImagePreprocessor):
         image_eroded_sub[midh : midh + 2, :] = DEFAULT_WHITE_COLOR
 
         used_fallback = False
+        quadrant_matches = None
         best_scale, all_max_t = self.getBestMatch(image_eroded_sub)
         if (
             best_scale is None
@@ -120,32 +124,75 @@ class CropOnMarkers(ImagePreprocessor):
                 self.fallback_marker_rescale_steps,
             )
         if best_scale is None:
-            print(
-                "[OMR marker failure] "
-                f"reason=scale_search "
-                f"best_match={round(float(all_max_t), 4)} "
-                f"min_threshold={self.min_matching_threshold} "
-                f"used_fallback={used_fallback}",
-                flush=True,
-            )
-            if config.outputs.show_image_level >= 1:
-                InteractionUtils.show("Quads", image_eroded_sub, config=config)
-            return None
+            if self.allow_quadrant_scale_fallback:
+                quadrant_matches = self.get_quadrant_matches(quads)
+            if quadrant_matches is not None:
+                used_fallback = True
+                all_max_t = max(match["score"] for match in quadrant_matches)
+                print(
+                    "[OMR marker scale] "
+                    f"mode=quadrant_independent "
+                    f"match={round(float(all_max_t), 4)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[OMR marker failure] "
+                    f"reason=scale_search "
+                    f"best_match={round(float(all_max_t), 4)} "
+                    f"min_threshold={self.min_matching_threshold} "
+                    f"used_fallback={used_fallback}",
+                    flush=True,
+                )
+                if config.outputs.show_image_level >= 1:
+                    InteractionUtils.show("Quads", image_eroded_sub, config=config)
+                return None
 
-        optimal_marker = ImageUtils.resize_util_h(
-            self.marker, u_height=int(self.marker.shape[0] * best_scale)
-        )
-        _h, w = optimal_marker.shape[:2]
+        if quadrant_matches is None:
+            optimal_marker = ImageUtils.resize_util_h(
+                self.marker, u_height=int(self.marker.shape[0] * best_scale)
+            )
+            _h, w = optimal_marker.shape[:2]
+        else:
+            optimal_marker = None
+            _h, w = 0, 0
+
         centres = []
         sum_t, max_t = 0, 0
         quarter_match_log = "Matching Marker:  "
         for k in range(0, 4):
-            res = cv2.matchTemplate(quads[k], optimal_marker, cv2.TM_CCOEFF_NORMED)
-            max_t = res.max()
+            used_local_scale = False
+            if quadrant_matches is not None:
+                match = quadrant_matches[k]
+                res = match["res"]
+                max_t = match["score"]
+                _h = match["height"]
+                w = match["width"]
+                used_local_scale = True
+            else:
+                res = cv2.matchTemplate(quads[k], optimal_marker, cv2.TM_CCOEFF_NORMED)
+                max_t = res.max()
+                match_failed = (
+                    max_t < self.min_quadrant_matching_threshold
+                    or abs(to_scalar(all_max_t) - to_scalar(max_t)) >= self.max_matching_variation
+                )
+                if match_failed and self.allow_quadrant_scale_fallback:
+                    local_match = self.get_quadrant_match(quads[k])
+                    if local_match is not None:
+                        match = local_match
+                        res = match["res"]
+                        max_t = match["score"]
+                        _h = match["height"]
+                        w = match["width"]
+                        used_local_scale = True
+
             quarter_match_log += f"Quarter{str(k + 1)}: {str(round(max_t, 3))}\t"
             if (
                 max_t < self.min_quadrant_matching_threshold
-                or abs(to_scalar(all_max_t) - to_scalar(max_t)) >= self.max_matching_variation
+                or (
+                    not used_local_scale
+                    and abs(to_scalar(all_max_t) - to_scalar(max_t)) >= self.max_matching_variation
+                )
             ):
                 print(
                     "[OMR marker failure] "
@@ -189,7 +236,6 @@ class CropOnMarkers(ImagePreprocessor):
             pt = [pt[1], pt[0]]
             pt[0] += origins[k][0]
             pt[1] += origins[k][1]
-            # print(">>",pt)
             image = cv2.rectangle(
                 image,
                 tuple(pt),
@@ -197,7 +243,6 @@ class CropOnMarkers(ImagePreprocessor):
                 MARKER_RECTANGLE_COLOR,
                 DEFAULT_LINE_WIDTH,
             )
-            # display:
             image_eroded_sub = cv2.rectangle(
                 image_eroded_sub,
                 tuple(pt),
@@ -210,13 +255,14 @@ class CropOnMarkers(ImagePreprocessor):
 
         logger.info(quarter_match_log)
         logger.info(f"Optimal Scale: {best_scale}")
-        print(
-            "[OMR marker scale] "
-            f"best_scale={best_scale} "
-            f"match={round(float(all_max_t), 4)} "
-            f"used_fallback={used_fallback}",
-            flush=True,
-        )
+        if quadrant_matches is None:
+            print(
+                "[OMR marker scale] "
+                f"best_scale={best_scale} "
+                f"match={round(float(all_max_t), 4)} "
+                f"used_fallback={used_fallback}",
+                flush=True,
+            )
         # analysis data
         self.threshold_circles.append(sum_t / 4)
 
@@ -299,6 +345,89 @@ class CropOnMarkers(ImagePreprocessor):
 
         lru_put(_MARKER_CACHE, cache_key, marker.copy(), _MARKER_CACHE_MAX)
         return marker
+
+    def get_quadrant_match(self, quad):
+        match = self.find_best_marker_match(
+            quad,
+            self.marker_rescale_range,
+            self.marker_rescale_steps,
+        )
+        if (
+            match is None
+            and self.marker_rescale_fallback
+            and (
+                self.marker_rescale_range != self.fallback_marker_rescale_range
+                or self.marker_rescale_steps != self.fallback_marker_rescale_steps
+            )
+        ):
+            match = self.find_best_marker_match(
+                quad,
+                self.fallback_marker_rescale_range,
+                self.fallback_marker_rescale_steps,
+            )
+        return match
+
+    def get_quadrant_matches(self, quads):
+        matches = []
+        for k in range(0, 4):
+            match = self.get_quadrant_match(quads[k])
+            if match is None:
+                return None
+            matches.append(match)
+        return matches
+
+    def find_best_marker_match(
+        self,
+        image_eroded_sub,
+        marker_rescale_range=None,
+        marker_rescale_steps=None,
+        min_threshold=None,
+    ):
+        marker_rescale_range = marker_rescale_range or self.marker_rescale_range
+        marker_rescale_steps = marker_rescale_steps or self.marker_rescale_steps
+        min_threshold = (
+            self.min_quadrant_matching_threshold
+            if min_threshold is None
+            else min_threshold
+        )
+        descent_per_step = (
+            marker_rescale_range[1] - marker_rescale_range[0]
+        ) // marker_rescale_steps
+        descent_per_step = max(1, descent_per_step)
+        _h, _w = self.marker.shape[:2]
+        best = None
+
+        for r0 in np.arange(
+            marker_rescale_range[1],
+            marker_rescale_range[0],
+            -1 * descent_per_step,
+        ):
+            s = float(r0 * 1 / 100)
+            if s == 0.0:
+                continue
+            rescaled_marker = ImageUtils.resize_util_h(
+                self.marker, u_height=int(_h * s)
+            )
+            marker_h, marker_w = rescaled_marker.shape[:2]
+            search_h, search_w = image_eroded_sub.shape[:2]
+            if marker_h > search_h or marker_w > search_w:
+                continue
+            res = cv2.matchTemplate(
+                image_eroded_sub, rescaled_marker, cv2.TM_CCOEFF_NORMED
+            )
+            max_t = res.max()
+            if best is None or best["score"] < max_t:
+                best = {
+                    "scale": s,
+                    "score": max_t,
+                    "res": res,
+                    "height": marker_h,
+                    "width": marker_w,
+                }
+
+        if best is None or best["score"] < min_threshold:
+            return None
+        return best
 
     # Resizing the marker within scaleRange at rate of descent_per_step to
     # find the best match.
