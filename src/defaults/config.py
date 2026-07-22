@@ -17,7 +17,7 @@ CONFIG_DEFAULTS = DotMap(
             "PAGE_TYPE_FOR_THRESHOLD": "white",
             # When strip has no clear filled/empty split (e.g. blank sheet), use this so only
             # clearly dark bubbles count as marked; reduces false positives from shadows/noise.
-            "STRICT_EMPTY_THRESHOLD": 140,
+            "STRICT_EMPTY_THRESHOLD": 155,
         },
         "alignment_params": {
             # Note: 'auto_align' enables automatic template alignment, use if the scans show slight misalignments.
