@@ -426,6 +426,28 @@ def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | N
     }
 
 
+def _reject_unreliable_roll_if_configured(template_json: dict, row: pd.Series) -> None:
+    """Reject Roll reads that suggest the sheet is misaligned, not merely missing/incomplete."""
+    max_slots = _roll_slot_count(template_json)
+    if max_slots is None:
+        return
+    roll = str(row.get("Roll", "")).strip()
+    if not roll:
+        return
+    if roll.isdigit() and len(roll) <= max_slots:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unreliable Roll read: expected at most {max_slots} digits, got {len(roll)} characters. "
+            "This usually means the sheet is misaligned, blurred, cropped, or has multiple marks in the student-code area. "
+            "The answer read may also be unreliable, so please retake or rescan the sheet. "
+            f"อ่านรหัสนักเรียนผิดปกติ: ควรมีไม่เกิน {max_slots} หลัก แต่อ่านได้ {len(roll)} ตัวอักษร "
+            "มักเกิดจากภาพเอียง เบลอ ครอปไม่ครบ หรือฝนช่องรหัสซ้อนหลายช่อง จึงไม่ควรบันทึกคะแนนจากภาพนี้"
+        ),
+    )
+
+
 def _serve_checked_omr_file(file_path: str):
     """Serve a file from CheckedOMRs dir; raise HTTPException 404 if invalid.
     file_path can be a filename or subpath like '2025-02/xxx.jpg' (month subfolder).
@@ -763,6 +785,7 @@ def check_omr(
         # โหมด anonymous (require_roll=false): ไม่บังคับ Roll — นักเรียนไม่ฝนรหัส ใบยังตรวจได้ปกติ
         # โหมด student (require_roll=true): ไม่ reject เมื่อ Roll หาย/ไม่ครบ แต่ส่ง warning ให้ Laravel จัดเป็นงานรอแก้รหัส
         if require_roll:
+            _reject_unreliable_roll_if_configured(template_for_roll, row)
             roll_warning = _roll_warning_if_configured(template_for_roll, row)
             if roll_warning:
                 warnings.append(roll_warning)
