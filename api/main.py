@@ -298,19 +298,44 @@ UNKNOWN_SCHOOL_ID = "_unknown"
 CHECKED_MAX_SIDE = 1600
 CHECKED_TARGET_BYTES = 900 * 1024  # target under ~1MB if possible
 
-# When template defines customLabels.Roll, reject implausible reads (bad photo / alignment).
+# When template defines customLabels.Roll, flag implausible reads (bad photo / alignment).
 ROLL_VALIDATION_MIN_LEN = 4
 
 
-def _roll_stem_for_checked_storage(responses: dict, template_json: dict) -> str | None:
-    """Use OMR-read Roll for stable filenames only when the template defines customLabels.Roll."""
+def _roll_slot_count(template_json: dict) -> int | None:
+    """Return expanded Roll slot count when template defines customLabels.Roll."""
     custom = template_json.get("customLabels")
     if not isinstance(custom, dict) or "Roll" not in custom:
         return None
-    roll = str(responses.get("Roll", "")).strip()
-    if not roll or not roll.isdigit():
+    roll_keys = custom.get("Roll")
+    if not isinstance(roll_keys, list) or not roll_keys:
         return None
-    if len(roll) > 32:
+    try:
+        from src.utils.parsing import parse_fields
+
+        parsed_keys = parse_fields("Custom Label: Roll", roll_keys)
+    except Exception as e:
+        logger.info(f"Roll validation skipped: cannot parse customLabels.Roll ({e})")
+        return None
+    return len(parsed_keys)
+
+
+def _is_valid_roll_for_template(roll: str, template_json: dict) -> bool:
+    max_slots = _roll_slot_count(template_json)
+    if max_slots is None:
+        return False
+    return bool(
+        roll
+        and roll.isdigit()
+        and len(roll) >= ROLL_VALIDATION_MIN_LEN
+        and len(roll) <= max_slots
+    )
+
+
+def _roll_stem_for_checked_storage(responses: dict, template_json: dict) -> str | None:
+    """Use OMR-read Roll for stable filenames only when the Roll read is plausible."""
+    roll = str(responses.get("Roll", "")).strip()
+    if not _is_valid_roll_for_template(roll, template_json):
         return None
     return roll
 
@@ -369,25 +394,15 @@ def _persist_checked_image_optimized(checked_src: Path, persistent_dest: Path) -
     raise OSError("Failed to encode checked image")
 
 
-def _validate_roll_if_configured(template_json: dict, row: pd.Series) -> None:
-    """If template has customLabels.Roll, require Roll to be digits-only with length in [ROLL_VALIDATION_MIN_LEN, N].
+def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | None:
+    """Return a warning when Roll is configured but the OMR-read value is implausible.
 
-    N = expanded roll slot count (e.g. 5 for roll1..roll5). On failure: HTTP 400 (no success payload, no checked image).
+    N = expanded roll slot count (e.g. 5 for roll1..roll5). This is intentionally non-fatal:
+    Laravel can save the scan as unbound/pending and let a teacher correct the student code.
     """
-    custom = template_json.get("customLabels")
-    if not isinstance(custom, dict) or "Roll" not in custom:
-        return
-    roll_keys = custom.get("Roll")
-    if not isinstance(roll_keys, list) or not roll_keys:
-        return
-    try:
-        from src.utils.parsing import parse_fields
-
-        parsed_keys = parse_fields("Custom Label: Roll", roll_keys)
-    except Exception as e:
-        logger.info(f"Roll validation skipped: cannot parse customLabels.Roll ({e})")
-        return
-    max_slots = len(parsed_keys)
+    max_slots = _roll_slot_count(template_json)
+    if max_slots is None:
+        return None
     roll = str(row.get("Roll", "")).strip()
     if (
         roll
@@ -395,16 +410,20 @@ def _validate_roll_if_configured(template_json: dict, row: pd.Series) -> None:
         and len(roll) >= ROLL_VALIDATION_MIN_LEN
         and len(roll) <= max_slots
     ):
-        return
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"Invalid Roll (student ID read from sheet): must be {ROLL_VALIDATION_MIN_LEN}–{max_slots} "
-            "digits (0–9 only). This usually means the image is unclear, cropped, or poorly lit — retake or rescan. "
-            f"รหัสนักเรียน (Roll) ต้องเป็นตัวเลข {ROLL_VALIDATION_MIN_LEN}–{max_slots} หลัก "
-            "หากไม่ถูกต้องมักเกิดจากภาพไม่ชัดหรือกรอบกระดาษไม่ครบ — กรุณาสแกนใหม่"
+        return None
+    return {
+        "code": "invalid_roll",
+        "severity": "warning",
+        "field": "Roll",
+        "message": (
+            f"Invalid Roll (student ID read from sheet): expected {ROLL_VALIDATION_MIN_LEN}-{max_slots} "
+            "digits. The sheet was processed, but Laravel should keep it unbound until a teacher corrects the student code. "
+            f"รหัสนักเรียน (Roll) ควรเป็นตัวเลข {ROLL_VALIDATION_MIN_LEN}-{max_slots} หลัก "
+            "ระบบตรวจคะแนนให้แล้ว แต่ควรให้ครูแก้รหัสนักเรียนก่อนผูกคะแนนรายคน"
         ),
-    )
+        "min_length": ROLL_VALIDATION_MIN_LEN,
+        "max_length": max_slots,
+    }
 
 
 def _serve_checked_omr_file(file_path: str):
@@ -740,9 +759,13 @@ def check_omr(
                     score = None
 
         template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
+        warnings = []
         # โหมด anonymous (require_roll=false): ไม่บังคับ Roll — นักเรียนไม่ฝนรหัส ใบยังตรวจได้ปกติ
+        # โหมด student (require_roll=true): ไม่ reject เมื่อ Roll หาย/ไม่ครบ แต่ส่ง warning ให้ Laravel จัดเป็นงานรอแก้รหัส
         if require_roll:
-            _validate_roll_if_configured(template_for_roll, row)
+            roll_warning = _roll_warning_if_configured(template_for_roll, row)
+            if roll_warning:
+                warnings.append(roll_warning)
 
         # Build responses dict from template columns (file_id, input_path, output_path, score, then Roll, q1, ...)
         response_cols = [c for c in df.columns if c not in ("file_id", "input_path", "output_path", "score")]
@@ -761,7 +784,7 @@ def check_omr(
         mark_timing("parse_results")
 
         # Copy checked OMR image to persistent folder.
-        # When template defines Roll and the read Roll is digits-only: use .../by-roll/{roll}.jpg
+        # When template defines Roll and the read Roll is plausible: use .../by-roll/{roll}.jpg
         # under the same school + exam so rescans overwrite one file (no UUID pile-up).
         # Otherwise: legacy .../<YYYY-MM>/<uuid>_<stem>.jpg under the same folder layout as before.
         checked_omr_path = None
@@ -794,6 +817,8 @@ def check_omr(
             "file_id": file_id,
             "responses": responses,
         }
+        if warnings:
+            payload["warnings"] = warnings
         if checked_omr_path:
             payload["checked_omr_path"] = checked_omr_path
         if checked_omr_filename:
