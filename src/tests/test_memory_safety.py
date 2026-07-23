@@ -92,6 +92,48 @@ def test_axis_aligned_geometry_rejects_skewed_marker_grid():
     assert processor.is_axis_geometry_reliable(geometry) is False
 
 
+def test_axis_marker_selection_uses_consistent_rectangle_over_stronger_false_peaks():
+    processor = object.__new__(CropOnMarkers)
+    processor.min_quadrant_matching_threshold = 0.33
+    processor.max_axis_tilt_degrees = 3.0
+    processor.max_axis_side_ratio = 1.06
+    contexts = []
+    true_locations = [(8, 8), (88, 8), (8, 88), (88, 88)]
+    false_locations = [(55, 35), (20, 20), (30, 40), (60, 60)]
+    origins = [(0, 0), (100, 0), (0, 100), (100, 100)]
+
+    for origin, true_location, false_location in zip(
+        origins,
+        true_locations,
+        false_locations,
+    ):
+        response = np.zeros((96, 96), dtype=np.float32)
+        response[true_location[1], true_location[0]] = 0.82
+        response[false_location[1], false_location[0]] = 0.95
+        contexts.append(
+            {
+                "res": response,
+                "origin": origin,
+                "height": 4,
+                "width": 4,
+            }
+        )
+
+    selected = processor.select_axis_aligned_marker_candidates(
+        contexts,
+        (200, 200),
+    )
+
+    assert selected is not None
+    assert [candidate["rank"] for candidate in selected] == [2, 2, 2, 2]
+    assert [candidate["center"] for candidate in selected] == [
+        [10.0, 10.0],
+        [190.0, 10.0],
+        [10.0, 190.0],
+        [190.0, 190.0],
+    ]
+
+
 def test_reference_cache_reuses_identical_temp_file_contents(tmp_path):
     _REFERENCE_CACHE.clear()
     source = "templates/50q/reference.png"

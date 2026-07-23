@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from itertools import product
 from math import atan2, degrees
 import os
 
@@ -165,8 +166,8 @@ class CropOnMarkers(ImagePreprocessor):
             optimal_marker = None
             _h, w = 0, 0
 
-        centres = []
         sum_t, max_t = 0, 0
+        match_contexts = []
         quarter_match_log = "Matching Marker:  "
         for k in range(0, 4):
             used_local_scale = False
@@ -240,10 +241,39 @@ class CropOnMarkers(ImagePreprocessor):
                     )
                 return None
 
-            pt = np.argwhere(res == max_t)[0]
-            pt = [pt[1], pt[0]]
-            pt[0] += origins[k][0]
-            pt[1] += origins[k][1]
+            match_contexts.append(
+                {
+                    "res": res,
+                    "origin": origins[k],
+                    "height": _h,
+                    "width": w,
+                }
+            )
+            sum_t += max_t
+
+        if self.crop_mode == "axis_aligned":
+            selected_candidates = self.select_axis_aligned_marker_candidates(
+                match_contexts,
+                image_eroded_sub.shape,
+            )
+            if selected_candidates is None:
+                print(
+                    "[OMR marker failure] "
+                    "reason=no_consistent_axis_rectangle",
+                    flush=True,
+                )
+                return None
+        else:
+            selected_candidates = [
+                self.marker_candidates(context, limit=1)[0]
+                for context in match_contexts
+            ]
+
+        centres = []
+        for candidate in selected_candidates:
+            pt = candidate["top_left"]
+            w = candidate["width"]
+            _h = candidate["height"]
             image = cv2.rectangle(
                 image,
                 tuple(pt),
@@ -259,7 +289,6 @@ class CropOnMarkers(ImagePreprocessor):
                 4,
             )
             centres.append([pt[0] + w / 2, pt[1] + _h / 2])
-            sum_t += max_t
 
         logger.info(quarter_match_log)
         logger.info(f"Optimal Scale: {best_scale}")
@@ -320,6 +349,163 @@ class CropOnMarkers(ImagePreprocessor):
         # iterations : Tuned to 2.
         # image_eroded_sub = image_norm - cv2.erode(image_norm, kernel=np.ones((5,5)),iterations=2)
         return image
+
+    def marker_candidates(self, match_context, limit=6):
+        """Return distinct local maxima from one quadrant's template response."""
+        response = match_context["res"].copy()
+        origin_x, origin_y = match_context["origin"]
+        marker_h = int(match_context["height"])
+        marker_w = int(match_context["width"])
+        suppression_radius = max(2, int(round(max(marker_h, marker_w) * 0.75)))
+        candidates = []
+
+        for rank in range(1, limit + 1):
+            _, score, _, location = cv2.minMaxLoc(response)
+            if score < self.min_quadrant_matching_threshold:
+                break
+            local_x, local_y = location
+            top_left = [local_x + origin_x, local_y + origin_y]
+            candidates.append(
+                {
+                    "rank": rank,
+                    "score": float(score),
+                    "top_left": top_left,
+                    "center": [
+                        top_left[0] + marker_w / 2,
+                        top_left[1] + marker_h / 2,
+                    ],
+                    "height": marker_h,
+                    "width": marker_w,
+                }
+            )
+            cv2.circle(
+                response,
+                location,
+                suppression_radius,
+                -1.0,
+                thickness=-1,
+            )
+
+        return candidates
+
+    def select_axis_aligned_marker_candidates(self, match_contexts, image_shape):
+        """Choose four matches that form one large, straight marker rectangle."""
+        top_candidates = [
+            self.marker_candidates(context, limit=1)[0]
+            for context in match_contexts
+        ]
+        top_result = self.score_axis_marker_selection(
+            top_candidates,
+            image_shape,
+        )
+        if top_result is not None:
+            top_score, top_geometry = top_result
+            self.log_marker_candidate_selection(
+                top_candidates,
+                [1, 1, 1, 1],
+                top_score,
+                top_geometry,
+            )
+            return top_candidates
+
+        candidate_groups = [
+            self.marker_candidates(context)
+            for context in match_contexts
+        ]
+        if any(not candidates for candidates in candidate_groups):
+            return None
+
+        image_height, image_width = image_shape[:2]
+        best_selection = None
+        best_score = float("-inf")
+        best_geometry = None
+
+        # Context order is top-left, top-right, bottom-left, bottom-right.
+        for tl, tr, bl, br in product(*candidate_groups):
+            selection = [tl, tr, bl, br]
+            result = self.score_axis_marker_selection(
+                selection,
+                (image_height, image_width),
+            )
+            if result is None:
+                continue
+            selection_score, geometry = result
+            if selection_score > best_score:
+                best_score = selection_score
+                best_selection = selection
+                best_geometry = geometry
+
+        if best_selection is not None:
+            self.log_marker_candidate_selection(
+                best_selection,
+                [len(group) for group in candidate_groups],
+                best_score,
+                best_geometry,
+            )
+        return best_selection
+
+    def score_axis_marker_selection(self, selection, image_shape):
+        tl, tr, bl, br = selection
+        ordered_centres = np.asarray(
+            [tl["center"], tr["center"], br["center"], bl["center"]],
+            dtype=np.float32,
+        )
+        geometry = self.marker_geometry(ordered_centres)
+        if not self.is_axis_geometry_reliable(geometry):
+            return None
+
+        image_height, image_width = image_shape[:2]
+        top_width = float(np.linalg.norm(ordered_centres[1] - ordered_centres[0]))
+        bottom_width = float(np.linalg.norm(ordered_centres[2] - ordered_centres[3]))
+        left_height = float(np.linalg.norm(ordered_centres[3] - ordered_centres[0]))
+        right_height = float(np.linalg.norm(ordered_centres[2] - ordered_centres[1]))
+        width_fraction = min(top_width, bottom_width) / max(image_width, 1)
+        height_fraction = min(left_height, right_height) / max(image_height, 1)
+        if width_fraction < 0.45 or height_fraction < 0.45:
+            return None
+
+        match_score = sum(candidate["score"] for candidate in selection) / 4
+        area_score = width_fraction * height_fraction
+        tilt_penalty = sum(
+            geometry[key]
+            for key in (
+                "top_tilt",
+                "bottom_tilt",
+                "left_tilt",
+                "right_tilt",
+            )
+        )
+        ratio_penalty = geometry["width_ratio"] + geometry["height_ratio"] - 2
+        selection_score = (
+            match_score
+            + 0.35 * area_score
+            - 0.01 * tilt_penalty
+            - 0.5 * ratio_penalty
+        )
+        return selection_score, geometry
+
+    @staticmethod
+    def log_marker_candidate_selection(
+        selection,
+        candidate_counts,
+        selection_score,
+        geometry,
+    ):
+        selected_ranks = ",".join(str(item["rank"]) for item in selection)
+        selected_scores = ",".join(
+            f"{item['score']:.4f}"
+            for item in selection
+        )
+        print(
+            "[OMR marker candidate selection] "
+            f"candidate_counts={','.join(str(count) for count in candidate_counts)} "
+            f"selected_ranks={selected_ranks} "
+            f"match_scores={selected_scores} "
+            f"selection_score={selection_score:.4f} "
+            f"width_ratio={geometry['width_ratio']:.4f} "
+            f"height_ratio={geometry['height_ratio']:.4f}",
+            flush=True,
+        )
 
     @staticmethod
     def _horizontal_tilt(first, second):
