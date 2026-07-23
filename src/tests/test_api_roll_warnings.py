@@ -50,10 +50,12 @@ def test_roll_warning_is_returned_for_short_student_code():
     warning = _roll_warning_if_configured(ROLL_TEMPLATE, row)
 
     assert warning is not None
-    assert warning["code"] == "invalid_roll"
+    assert warning["code"] == "incomplete_roll"
     assert warning["field"] == "Roll"
     assert warning["min_length"] == 4
     assert warning["max_length"] == 5
+    assert warning["expected_length"] == 5
+    assert warning["detected_length"] == 2
 
 
 def test_valid_roll_has_no_warning_and_can_use_by_roll_storage():
@@ -66,6 +68,7 @@ def test_valid_roll_has_no_warning_and_can_use_by_roll_storage():
 
 def test_invalid_roll_does_not_use_by_roll_storage():
     assert _roll_stem_for_checked_storage({"Roll": "33"}, ROLL_TEMPLATE) is None
+    assert _roll_stem_for_checked_storage({"Roll": "0844"}, ROLL_TEMPLATE) is None
     assert _roll_stem_for_checked_storage({"Roll": ""}, ROLL_TEMPLATE) is None
     assert _roll_stem_for_checked_storage({"Roll": "12AB"}, ROLL_TEMPLATE) is None
 
@@ -101,7 +104,31 @@ def test_check_endpoint_returns_warning_instead_of_rejecting_short_roll(monkeypa
     assert response.status_code == 200
     payload = json.loads(response.body)
     assert payload["responses"]["Roll"] == "33"
-    assert payload["warnings"][0]["code"] == "invalid_roll"
+    assert payload["warnings"][0]["code"] == "incomplete_roll"
+
+
+def test_check_endpoint_warns_for_four_digit_roll_on_five_slot_template(monkeypatch):
+    monkeypatch.setattr(api_main, "entry_point", fake_entry_point_with_roll("0844"))
+    upload = UploadFile(
+        filename="sheet.jpg",
+        file=BytesIO(b"fake-image"),
+    )
+
+    response = api_main.check_omr(
+        image=upload,
+        template_id="20q",
+        evaluation=None,
+        school_id=None,
+        exam_id="45",
+        require_roll=True,
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["responses"]["Roll"] == "0844"
+    assert payload["warnings"][0]["code"] == "incomplete_roll"
+    assert payload["warnings"][0]["expected_length"] == 5
+    assert payload["warnings"][0]["detected_length"] == 4
 
 
 def test_check_endpoint_rejects_overlong_roll(monkeypatch):

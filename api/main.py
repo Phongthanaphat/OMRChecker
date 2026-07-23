@@ -327,8 +327,7 @@ def _is_valid_roll_for_template(roll: str, template_json: dict) -> bool:
     return bool(
         roll
         and roll.isdigit()
-        and len(roll) >= ROLL_VALIDATION_MIN_LEN
-        and len(roll) <= max_slots
+        and len(roll) == max_slots
     )
 
 
@@ -407,22 +406,24 @@ def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | N
     if (
         roll
         and roll.isdigit()
-        and len(roll) >= ROLL_VALIDATION_MIN_LEN
-        and len(roll) <= max_slots
+        and len(roll) == max_slots
     ):
         return None
+    code = "incomplete_roll" if roll and roll.isdigit() and len(roll) < max_slots else "invalid_roll"
     return {
-        "code": "invalid_roll",
+        "code": code,
         "severity": "warning",
         "field": "Roll",
         "message": (
-            f"Invalid Roll (student ID read from sheet): expected {ROLL_VALIDATION_MIN_LEN}-{max_slots} "
+            f"Invalid Roll (student ID read from sheet): expected exactly {max_slots} "
             "digits. The sheet was processed, but Laravel should keep it unbound until a teacher corrects the student code. "
-            f"รหัสนักเรียน (Roll) ควรเป็นตัวเลข {ROLL_VALIDATION_MIN_LEN}-{max_slots} หลัก "
+            f"รหัสนักเรียน (Roll) ควรเป็นตัวเลข {max_slots} หลัก "
             "ระบบตรวจคะแนนให้แล้ว แต่ควรให้ครูแก้รหัสนักเรียนก่อนผูกคะแนนรายคน"
         ),
         "min_length": ROLL_VALIDATION_MIN_LEN,
         "max_length": max_slots,
+        "expected_length": max_slots,
+        "detected_length": len(roll),
     }
 
 

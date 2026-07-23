@@ -372,6 +372,38 @@ class ImageInstanceOps:
                                     -1,
                                 )
 
+                    fallback_bubble = self.detect_int_bubble_by_inner_darkness(
+                        img,
+                        field_block_bubbles,
+                        box_w,
+                        box_h,
+                        shift,
+                        detected_bubbles,
+                    )
+                    if fallback_bubble is not None:
+                        detected_bubbles.append(fallback_bubble)
+                        x, y = fallback_bubble.x + field_block.shift, fallback_bubble.y
+                        if evaluation_config is None:
+                            cv2.rectangle(
+                                final_marked,
+                                (int(x + box_w / 12), int(y + box_h / 12)),
+                                (
+                                    int(x + box_w - box_w / 12),
+                                    int(y + box_h - box_h / 12),
+                                ),
+                                CLR_DARK_GRAY,
+                                3,
+                            )
+                            cv2.putText(
+                                final_marked,
+                                str(fallback_bubble.field_value),
+                                (x, y),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                TEXT_SIZE,
+                                (20, 20, 10),
+                                int(1 + 3.5 * TEXT_SIZE),
+                            )
+
                     for bubble in detected_bubbles:
                         field_label, field_value = (
                             bubble.field_label,
@@ -514,6 +546,58 @@ class ImageInstanceOps:
 
         finally:
             self.reset_all_save_img()
+
+    @staticmethod
+    def detect_int_bubble_by_inner_darkness(
+        img, field_block_bubbles, box_w, box_h, shift, detected_bubbles
+    ):
+        """Recover faint integer bubbles by looking at the inner fill, not the whole ring box.
+
+        Applies only when a QTYPE_INT strip has no detected bubble. This avoids changing MCQ
+        answer scoring while rescuing student-code digits where pencil marks are small/light.
+        """
+        if detected_bubbles or not field_block_bubbles:
+            return None
+        first = field_block_bubbles[0]
+        if str(getattr(first, "field_type", "")) not in {"QTYPE_INT", "QTYPE_INT_FROM_1"}:
+            return None
+
+        scores = []
+        rows, cols = img.shape[:2]
+        mx = max(3, int(box_w * 0.24))
+        my = max(3, int(box_h * 0.24))
+        for bubble in field_block_bubbles:
+            x = int(round(bubble.x + shift))
+            y = int(round(bubble.y))
+            x1 = max(0, min(cols, x + mx))
+            x2 = max(0, min(cols, x + box_w - mx))
+            y1 = max(0, min(rows, y + my))
+            y2 = max(0, min(rows, y + box_h - my))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            inner = img[y1:y2, x1:x2]
+            if inner.size == 0:
+                continue
+            inner_mean = float(np.mean(inner))
+            dark_ratio = float(np.mean(inner < 155))
+            scores.append((inner_mean, dark_ratio, bubble))
+
+        if len(scores) < 2:
+            return None
+        scores.sort(key=lambda item: item[0])
+        best_mean, best_dark_ratio, best_bubble = scores[0]
+        second_mean = scores[1][0]
+        median_mean = float(np.median([s[0] for s in scores]))
+        spread = float(np.std([s[0] for s in scores]))
+
+        if (
+            best_dark_ratio >= 0.16
+            and median_mean - best_mean >= 16
+            and second_mean - best_mean >= 8
+            and spread >= 7
+        ):
+            return best_bubble
+        return None
 
     @staticmethod
     def draw_template_layout(img, template, shifted=True, draw_qvals=False, border=-1):
