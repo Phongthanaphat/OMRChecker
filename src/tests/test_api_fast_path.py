@@ -36,6 +36,7 @@ def test_check_endpoint_declares_template_id_as_multipart_form_field():
         "exam_id",
         "require_roll",
         "pre_rectified",
+        "marker_center_rectified",
     } <= body_param_names
     assert "template_id" not in query_param_names
     assert "evaluate" not in query_param_names
@@ -65,6 +66,35 @@ def test_pre_rectified_request_disables_alignment_and_perspective_warp():
     ]
     assert configured["preProcessors"][0]["options"]["crop_mode"] == "axis_aligned"
     assert "crop_mode" not in template["preProcessors"][1]["options"]
+
+
+def test_marker_center_rectified_request_skips_all_geometric_preprocessors():
+    template = {
+        "preProcessors": [
+            {
+                "name": "FeatureBasedAlignment",
+                "options": {"reference": "reference.png"},
+            },
+            {
+                "name": "CropOnMarkers",
+                "options": {"relativePath": "omr_marker.jpg"},
+            },
+            {
+                "name": "GaussianBlur",
+                "options": {"kernelSize": [3, 3]},
+            },
+        ],
+    }
+
+    configured = api_main._configure_template_for_request(
+        template,
+        pre_rectified=True,
+        marker_center_rectified=True,
+    )
+
+    assert [item["name"] for item in configured["preProcessors"]] == [
+        "GaussianBlur",
+    ]
 
 
 def test_non_rectified_request_preserves_template_preprocessors():

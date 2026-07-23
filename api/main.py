@@ -551,6 +551,7 @@ def _configure_template_for_request(
     template_data: dict,
     *,
     pre_rectified: bool,
+    marker_center_rectified: bool = False,
 ) -> dict:
     """Avoid a second perspective transform for images rectified by the browser."""
     configured = deepcopy(template_data)
@@ -562,6 +563,8 @@ def _configure_template_for_request(
         if processor.get("name") == "FeatureBasedAlignment":
             continue
         if processor.get("name") == "CropOnMarkers":
+            if marker_center_rectified:
+                continue
             processor = deepcopy(processor)
             processor["options"] = {
                 **processor.get("options", {}),
@@ -671,6 +674,13 @@ def check_omr(
             "The API will validate and crop markers without applying another homography."
         ),
     ),
+    marker_center_rectified: bool = Form(
+        False,
+        description=(
+            "True when the browser rectified exactly from marker center to marker center. "
+            "Requires pre_rectified=true and skips marker detection/cropping in the API."
+        ),
+    ),
 ):
     """
     Upload an OMR sheet image. Returns responses (Roll, q1, q2, ...).
@@ -683,6 +693,8 @@ def check_omr(
       (ตรวจคะแนนอย่างเดียว ไม่ผูกนักเรียน) — Roll ที่อ่านได้จะยังอยู่ใน responses แต่ไม่ถูกบังคับรูปแบบ
     - pre_rectified (optional, default false): true = ภาพจากกล้องถูกแก้ perspective ที่ browser แล้ว
       จึงครอปตาม marker แบบแกนตรงและไม่ warp ภาพซ้ำ
+    - marker_center_rectified (optional, default false): true = browser warp จากจุดกึ่งกลาง
+      marker ทั้ง 4 จุดแล้ว API จึงไม่ต้องค้นหา/crop marker ซ้ำ
 
     Sync `def` (ไม่ใช่ async) โดยตั้งใจ — FastAPI จะรันใน threadpool ทำให้งาน OpenCV
     ที่กิน CPU หนักไม่ block event loop (ไม่งั้น /health และ request อื่นค้างทั้งหมด)
@@ -700,6 +712,16 @@ def check_omr(
     upload_bytes = 0
     upload_path: Path | None = None
     pre_rectified = pre_rectified if isinstance(pre_rectified, bool) else False
+    marker_center_rectified = (
+        marker_center_rectified
+        if isinstance(marker_center_rectified, bool)
+        else False
+    )
+    if marker_center_rectified and not pre_rectified:
+        raise HTTPException(
+            status_code=400,
+            detail="marker_center_rectified requires pre_rectified=true",
+        )
 
     def mark_timing(name: str) -> None:
         nonlocal timing_stage_started_at
@@ -743,6 +765,7 @@ def check_omr(
         request_template = _configure_template_for_request(
             template_for_roll,
             pre_rectified=pre_rectified,
+            marker_center_rectified=marker_center_rectified,
         )
         for name, data in cached.items():
             if name == "template.json":
@@ -1039,6 +1062,7 @@ def check_omr(
             f"status={status_code if status_code is not None else '-'} "
             f"template_id={template_id} "
             f"pre_rectified={pre_rectified} "
+            f"marker_center_rectified={marker_center_rectified} "
             f"upload_bytes={upload_bytes} "
             f"input_width={input_dimensions[0] if input_dimensions else '-'} "
             f"input_height={input_dimensions[1] if input_dimensions else '-'} "
