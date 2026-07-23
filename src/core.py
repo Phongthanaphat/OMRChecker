@@ -31,6 +31,7 @@ class ImageInstanceOps:
         self.tuning_config = tuning_config
         self.save_image_level = tuning_config.outputs.save_image_level
         self.save_img_list: Any = defaultdict(list)
+        self.last_grid_alignment_failures = []
 
     def apply_preprocessors(self, file_path, in_omr, template):
         tuning_config = self.tuning_config
@@ -161,6 +162,7 @@ class ImageInstanceOps:
     def read_omr_response(self, template, image, name, save_dir=None, evaluation_config=None):
         config = self.tuning_config
         auto_align = config.alignment_params.auto_align
+        self.last_grid_alignment_failures = []
         try:
             img = image.copy()
             # origDim = img.shape[:2]
@@ -311,15 +313,21 @@ class ImageInstanceOps:
                     #   "origin:", field_block.origin,'\n')
                 # print("End Alignment")
 
-            roll_grid_centers = {}
+            bubble_grid_centers = {}
             for field_block in template.field_blocks:
-                if field_block.name != "Roll":
-                    continue
-                roll_grid_centers[id(field_block)] = self.find_roll_grid_centers(
+                bubble_grid_centers[id(field_block)] = self.find_roll_grid_centers(
                     img,
                     field_block,
                     base_shift_x=field_block.shift,
                 )
+            self.last_grid_alignment_failures = [
+                field_block.name
+                for field_block in template.field_blocks
+                if (
+                    field_block.name != "Roll"
+                    and not bubble_grid_centers.get(id(field_block))
+                )
+            ]
 
             final_align = None
             if config.outputs.show_image_level >= 2:
@@ -340,14 +348,14 @@ class ImageInstanceOps:
             total_q_strip_no = 0
             for field_block in template.field_blocks:
                 box_w, box_h = field_block.bubble_dimensions
-                block_roll_centers = roll_grid_centers.get(id(field_block))
+                block_grid_centers = bubble_grid_centers.get(id(field_block))
                 q_std_vals = []
                 for field_block_bubbles in field_block.traverse_bubbles:
                     q_strip_vals = []
                     for pt in field_block_bubbles:
                         fitted_center = (
-                            block_roll_centers.get(id(pt))
-                            if block_roll_centers
+                            block_grid_centers.get(id(pt))
+                            if block_grid_centers
                             else None
                         )
                         if fitted_center is not None:
@@ -402,11 +410,12 @@ class ImageInstanceOps:
             for field_block in template.field_blocks:
                 block_q_strip_no = 1
                 box_w, box_h = field_block.bubble_dimensions
-                block_roll_centers = roll_grid_centers.get(id(field_block))
+                block_grid_centers = bubble_grid_centers.get(id(field_block))
                 shift = field_block.shift
                 is_roll_block = field_block.name == "Roll"
                 s, d = field_block.origin, field_block.dimensions
                 key = field_block.name[:3]
+                block_answer_summary = []
                 # cv2.rectangle(final_marked,(s[0]+shift,s[1]),(s[0]+shift+d[0],
                 #   s[1]+d[1]),CLR_BLACK,3)
                 for field_block_bubbles in field_block.traverse_bubbles:
@@ -440,16 +449,24 @@ class ImageInstanceOps:
                     for bubble in field_block_bubbles:
                         bubble_is_marked = (
                             not is_roll_block
+                            and not block_grid_centers
                             and per_q_strip_threshold > all_q_vals[total_q_box_no]
                         )
                         total_q_box_no += 1
                         if bubble_is_marked:
                             detected_bubbles.append(bubble)
-                            x, y, field_value = (
-                                bubble.x + shift,
-                                bubble.y,
-                                bubble.field_value,
+                            fitted_center = (
+                                block_grid_centers.get(id(bubble))
+                                if block_grid_centers
+                                else None
                             )
+                            if fitted_center is not None:
+                                x = int(round(fitted_center[0] - box_w / 2))
+                                y = int(round(fitted_center[1] - box_h / 2))
+                            else:
+                                x = bubble.x + shift
+                                y = bubble.y
+                            field_value = bubble.field_value
                             # When evaluation: skip A/B/C/D draw; we draw green/red later
                             skip_draw = (
                                 evaluation_config is not None
@@ -478,8 +495,21 @@ class ImageInstanceOps:
                         else:
                             # When evaluation: don't draw gray square on any empty bubble
                             if evaluation_config is None and not is_roll_block:
-                                x_unmarked = bubble.x + shift
-                                y_unmarked = bubble.y
+                                fitted_center = (
+                                    block_grid_centers.get(id(bubble))
+                                    if block_grid_centers
+                                    else None
+                                )
+                                if fitted_center is not None:
+                                    x_unmarked = int(
+                                        round(fitted_center[0] - box_w / 2)
+                                    )
+                                    y_unmarked = int(
+                                        round(fitted_center[1] - box_h / 2)
+                                    )
+                                else:
+                                    x_unmarked = bubble.x + shift
+                                    y_unmarked = bubble.y
                                 cv2.rectangle(
                                     final_marked,
                                     (int(x_unmarked + box_w / 10), int(y_unmarked + box_h / 10)),
@@ -491,8 +521,45 @@ class ImageInstanceOps:
                                     -1,
                                 )
 
+                    if not is_roll_block and block_grid_centers:
+                        detected_bubbles = (
+                            self.detect_mcq_bubbles_by_inner_darkness(
+                                img,
+                                field_block_bubbles,
+                                block_grid_centers,
+                            )
+                        )
+                        block_answer_summary.append(
+                            f"{field_block_bubbles[0].field_label}:"
+                            + (
+                                "".join(
+                                    str(bubble.field_value)
+                                    for bubble in detected_bubbles
+                                )
+                                or "-"
+                            )
+                        )
+                        if evaluation_config is None:
+                            for detected_bubble in detected_bubbles:
+                                fitted_center = block_grid_centers[id(detected_bubble)]
+                                x = int(round(fitted_center[0] - box_w / 2))
+                                y = int(round(fitted_center[1] - box_h / 2))
+                                cv2.rectangle(
+                                    final_marked,
+                                    (
+                                        int(x + box_w / 12),
+                                        int(y + box_h / 12),
+                                    ),
+                                    (
+                                        int(x + box_w - box_w / 12),
+                                        int(y + box_h - box_h / 12),
+                                    ),
+                                    CLR_DARK_GRAY,
+                                    3,
+                                )
+
                     fallback_bubble = None
-                    if not is_roll_block or block_roll_centers:
+                    if not is_roll_block or block_grid_centers:
                         fallback_bubble = self.detect_int_bubble_by_inner_darkness(
                             img,
                             field_block_bubbles,
@@ -500,13 +567,13 @@ class ImageInstanceOps:
                             box_h,
                             shift,
                             detected_bubbles,
-                            bubble_centers=block_roll_centers,
+                            bubble_centers=block_grid_centers,
                         )
                     if fallback_bubble is not None:
                         detected_bubbles.append(fallback_bubble)
                         fitted_center = (
-                            block_roll_centers.get(id(fallback_bubble))
-                            if block_roll_centers
+                            block_grid_centers.get(id(fallback_bubble))
+                            if block_grid_centers
                             else None
                         )
                         if fitted_center is not None:
@@ -565,6 +632,12 @@ class ImageInstanceOps:
 
                     block_q_strip_no += 1
                     total_q_strip_no += 1
+                if block_answer_summary:
+                    logger.info(
+                        "[OMR answer block] block=%s responses=%s",
+                        field_block.name,
+                        ",".join(block_answer_summary),
+                    )
                 # /for field_block
 
             # Evaluation overlay: green border = correct, red = incorrect, no A/B/C/D text
@@ -576,6 +649,7 @@ class ImageInstanceOps:
                 for field_block in template.field_blocks:
                     box_w, box_h = field_block.bubble_dimensions
                     shift = field_block.shift
+                    block_grid_centers = bubble_grid_centers.get(id(field_block))
                     for field_block_bubbles in field_block.traverse_bubbles:
                         for bubble in field_block_bubbles:
                             if bubble.field_label not in evaluation_config.questions_in_order:
@@ -595,9 +669,22 @@ class ImageInstanceOps:
                             else:
                                 color = (128, 128, 128)  # BGR gray unmarked
                                 circles_drawn["unmarked"] += 1
-                            x = bubble.x + shift
-                            y = bubble.y
-                            center = (int(x + box_w / 2), int(y + box_h / 2))
+                            fitted_center = (
+                                block_grid_centers.get(id(bubble))
+                                if block_grid_centers
+                                else None
+                            )
+                            if fitted_center is not None:
+                                center = tuple(
+                                    int(round(value)) for value in fitted_center
+                                )
+                            else:
+                                x = bubble.x + shift
+                                y = bubble.y
+                                center = (
+                                    int(x + box_w / 2),
+                                    int(y + box_h / 2),
+                                )
                             half = min(box_w, box_h) / 2
                             overlay_cfg = getattr(config, "evaluation_overlay", None)
                             if overlay_cfg is not None and hasattr(overlay_cfg, "toDict"):
@@ -742,21 +829,36 @@ class ImageInstanceOps:
 
     @classmethod
     def find_roll_grid_centers(cls, img, field_block, base_shift_x=0):
-        """Locate the printed 5x10 Roll circles and fit one local affine grid.
+        """Locate a printed bubble grid and fit one local affine transform.
 
         Marker rectification aligns the page corners, but a handheld photo can
-        still leave local perspective around the student-code area. Reading from
-        detected circle centers avoids guessing one translation for the whole grid.
+        still leave local perspective within the sheet. Reading every field block
+        from detected circle centers keeps Roll and answer bubbles on the same image.
         """
         started_at = perf_counter()
-        bubble_columns = list(field_block.traverse_bubbles)
+        block_name = str(getattr(field_block, "name", "unknown"))
+        bubble_groups = list(field_block.traverse_bubbles)
+        if bubble_groups and bubble_groups[0]:
+            first_group_x = [bubble.x for bubble in bubble_groups[0]]
+            first_group_y = [bubble.y for bubble in bubble_groups[0]]
+            group_runs_horizontally = (
+                max(first_group_x) - min(first_group_x)
+                > max(first_group_y) - min(first_group_y)
+            )
+        else:
+            group_runs_horizontally = False
+        bubble_columns = (
+            [list(column) for column in zip(*bubble_groups)]
+            if group_runs_horizontally
+            else bubble_groups
+        )
         if (
             len(bubble_columns) < 2
             or any(len(column) != len(bubble_columns[0]) for column in bubble_columns)
             or len(bubble_columns[0]) < 2
         ):
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 "reason=unsupported_grid_shape"
             )
             return None
@@ -803,7 +905,8 @@ class ImageInstanceOps:
         roi = img[top:bottom, left:right]
         if roi.size == 0:
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False reason=empty_roi"
+                f"[OMR bubble grid] block={block_name} applied=False "
+                "reason=empty_roi"
             )
             return None
 
@@ -822,7 +925,7 @@ class ImageInstanceOps:
         expected_count = len(bubble_columns) * len(bubble_columns[0])
         if circles is None:
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 "reason=too_few_circles candidates=0 "
                 f"expected={expected_count}"
             )
@@ -852,14 +955,14 @@ class ImageInstanceOps:
         candidates = candidates[plausible]
         if len(candidates) < int(expected_count * 0.70):
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 f"reason=too_few_circles candidates={len(candidates)} "
                 f"expected={expected_count}"
             )
             return None
         if len(candidates) > int(expected_count * 2.50):
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 f"reason=too_many_circles candidates={len(candidates)} "
                 f"expected={expected_count}"
             )
@@ -877,7 +980,7 @@ class ImageInstanceOps:
         )
         if horizontal_step is None or vertical_step is None:
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 "reason=grid_step_not_found"
             )
             return None
@@ -888,7 +991,7 @@ class ImageInstanceOps:
         )
         if determinant < horizontal_gap * vertical_gap * 0.40:
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 "reason=invalid_grid_geometry"
             )
             return None
@@ -947,7 +1050,7 @@ class ImageInstanceOps:
 
         if best_prediction is None:
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 "reason=no_grid_hypothesis"
             )
             return None
@@ -960,7 +1063,7 @@ class ImageInstanceOps:
         matched = distances < match_radius
         affine_coefficients = None
         for _ in range(3):
-            if int(np.count_nonzero(matched)) < int(expected_count * 0.75):
+            if int(np.count_nonzero(matched)) < int(expected_count * 0.60):
                 break
             affine_coefficients = np.linalg.lstsq(
                 logical_points[matched],
@@ -999,7 +1102,7 @@ class ImageInstanceOps:
             or not has_edge_coverage
         ):
             logger.warning(
-                "[OMR Roll grid] method=circle_grid applied=False "
+                f"[OMR bubble grid] block={block_name} applied=False "
                 f"reason=insufficient_grid_matches matched={matched_count} "
                 f"unique={unique_matches} expected={expected_count} "
                 f"edge_rows={edge_row_matches} edge_cols={edge_column_matches}"
@@ -1015,7 +1118,7 @@ class ImageInstanceOps:
         fit_error = float(np.median(distances[matched]))
         elapsed_ms = (perf_counter() - started_at) * 1000
         logger.info(
-            "[OMR Roll grid] method=circle_grid applied=True "
+            f"[OMR bubble grid] block={block_name} applied=True "
             f"matched={matched_count}/{expected_count} candidates={len(candidates)} "
             f"fit_error={fit_error:.2f} "
             f"origin=({affine_coefficients[2, 0]:.1f},{affine_coefficients[2, 1]:.1f}) "
@@ -1024,6 +1127,102 @@ class ImageInstanceOps:
             f"total_ms={elapsed_ms:.2f}"
         )
         return centers_by_bubble
+
+    @staticmethod
+    def detect_mcq_bubbles_by_inner_darkness(
+        img,
+        field_block_bubbles,
+        bubble_centers,
+    ):
+        """Read one MCQ row from small inner disks at fitted circle centers."""
+        if not field_block_bubbles or not bubble_centers:
+            return []
+
+        fitted_points = np.array(
+            [
+                bubble_centers[id(bubble)]
+                for bubble in field_block_bubbles
+                if id(bubble) in bubble_centers
+            ],
+            dtype=np.float32,
+        )
+        if len(fitted_points) < 2:
+            return []
+
+        grid_gap = float(
+            np.median(np.linalg.norm(np.diff(fitted_points, axis=0), axis=1))
+        )
+        sample_half = max(8, int(np.ceil(grid_gap * 0.46)))
+        yy, xx = np.ogrid[
+            -sample_half : sample_half + 1,
+            -sample_half : sample_half + 1,
+        ]
+        radius = np.sqrt(xx**2 + yy**2)
+        inner_mask = radius <= grid_gap * 0.14
+        background_mask = (radius >= grid_gap * 0.40) & (
+            radius <= grid_gap * 0.46
+        )
+
+        rows, cols = img.shape[:2]
+        scores = []
+        for bubble in field_block_bubbles:
+            fitted_center = bubble_centers.get(id(bubble))
+            if fitted_center is None:
+                continue
+            center_x, center_y = (int(round(value)) for value in fitted_center)
+            if (
+                center_x - sample_half < 0
+                or center_y - sample_half < 0
+                or center_x + sample_half >= cols
+                or center_y + sample_half >= rows
+            ):
+                continue
+            roi = img[
+                center_y - sample_half : center_y + sample_half + 1,
+                center_x - sample_half : center_x + sample_half + 1,
+            ]
+            inner = roi[inner_mask]
+            background = roi[background_mask]
+            if inner.size == 0 or background.size == 0:
+                continue
+            background_level = float(np.median(background))
+            inner_mean = float(np.mean(inner))
+            scores.append(
+                {
+                    "bubble": bubble,
+                    "local_contrast": background_level - inner_mean,
+                    "local_dark_ratio": float(
+                        np.mean(inner < background_level - 25)
+                    ),
+                }
+            )
+
+        if not scores:
+            return []
+
+        median_contrast = float(
+            np.median([score["local_contrast"] for score in scores])
+        )
+        detected = [
+            score["bubble"]
+            for score in scores
+            if (
+                score["local_contrast"] >= 22
+                and score["local_dark_ratio"] >= 0.14
+                and score["local_contrast"] - median_contrast >= 12
+            )
+        ]
+        score_summary = ",".join(
+            f"{score['bubble'].field_value}:{score['local_contrast']:.1f}"
+            for score in scores
+        )
+        logger.debug(
+            "[OMR answer diagnostic] "
+            f"question={field_block_bubbles[0].field_label} "
+            f"detected={','.join(str(bubble.field_value) for bubble in detected) or '-'} "
+            f"scores={score_summary}"
+        )
+        return detected
 
     @staticmethod
     def detect_int_bubble_by_inner_darkness(

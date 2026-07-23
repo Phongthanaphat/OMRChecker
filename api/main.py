@@ -885,6 +885,21 @@ def check_omr(
                         "ตรวจพบการฝนมากกว่าหนึ่งช่องในบางตำแหน่ง กรุณาลบช่องที่ฝนซ้ำให้ชัดเจนแล้วสแกนใหม่"
                     ),
                 )
+            if processing_error == "bubble_grid_not_found":
+                failed_blocks = entry_result.get("field_blocks") or []
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Unable to align the answer bubble grid reliably. "
+                        "Please hold the camera parallel to the sheet and rescan. "
+                        "จัดแนวช่องคำตอบได้ไม่ครบ กรุณาถือกล้องให้ขนานกับกระดาษและสแกนใหม่"
+                        + (
+                            f" (blocks: {','.join(map(str, failed_blocks))})"
+                            if failed_blocks
+                            else ""
+                        )
+                    ),
+                )
 
         row = None
         score = None

@@ -190,6 +190,7 @@ def test_check_endpoint_uses_in_memory_result(monkeypatch):
     [
         ("markers_not_found", "marker(s) not found"),
         ("multiple_marks", "Multiple marks were detected"),
+        ("bubble_grid_not_found", "Unable to align the answer bubble grid"),
     ],
 )
 def test_check_endpoint_preserves_processing_error_reason(

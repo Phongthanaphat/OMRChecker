@@ -433,6 +433,26 @@ def process_files(
         )
         mark_timing("read_response")
 
+        grid_alignment_failures = list(
+            template.image_instance_ops.last_grid_alignment_failures
+        )
+        if grid_alignment_failures:
+            logger.warning(
+                "[OMR bubble grid] rejecting file=%s failed_blocks=%s",
+                file_id,
+                ",".join(grid_alignment_failures),
+            )
+            if collect_results:
+                processing_results.append(
+                    {
+                        "error_code": "bubble_grid_not_found",
+                        "file_id": file_name,
+                        "field_blocks": grid_alignment_failures,
+                    }
+                )
+            mark_timing("write_error")
+            continue
+
         # TODO: move inner try catch here
         # concatenate roll nos, set unmarked responses, etc
         omr_response = get_concatenated_response(response_dict, template)
