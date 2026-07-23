@@ -616,13 +616,25 @@ class ImageInstanceOps:
         second_mean = scores[1][0]
         median_mean = float(np.median([s[0] for s in scores]))
         spread = float(np.std([s[0] for s in scores]))
-
-        if (
+        accepted = (
             best_dark_ratio >= 0.16
             and median_mean - best_mean >= 16
             and second_mean - best_mean >= 8
             and spread >= 7
-        ):
+        )
+        logger.info(
+            "[OMR Roll diagnostic] "
+            f"slot={first.field_label} "
+            f"shift={shift} "
+            f"best_inner_mean={best_mean:.2f} "
+            f"best_dark_ratio={best_dark_ratio:.3f} "
+            f"median_gap={median_mean - best_mean:.2f} "
+            f"second_gap={second_mean - best_mean:.2f} "
+            f"spread={spread:.2f} "
+            f"accepted={accepted}"
+        )
+
+        if accepted:
             return best_bubble
         return None
 
