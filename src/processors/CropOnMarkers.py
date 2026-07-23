@@ -1,5 +1,6 @@
-import os
 from collections import OrderedDict
+from math import atan2, degrees
+import os
 
 import cv2
 import numpy as np
@@ -61,6 +62,13 @@ class CropOnMarkers(ImagePreprocessor):
         self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
         self.allow_quadrant_scale_fallback = marker_ops.get(
             "allow_quadrant_scale_fallback", True
+        )
+        self.crop_mode = marker_ops.get("crop_mode", "perspective")
+        self.max_axis_tilt_degrees = float(
+            marker_ops.get("max_axis_tilt_degrees", 3.0)
+        )
+        self.max_axis_side_ratio = float(
+            marker_ops.get("max_axis_side_ratio", 1.06)
         )
         self.marker = self.load_marker(marker_ops, config)
 
@@ -266,7 +274,24 @@ class CropOnMarkers(ImagePreprocessor):
         # analysis data
         self.threshold_circles.append(sum_t / 4)
 
-        image = ImageUtils.four_point_transform(image, np.array(centres))
+        ordered_centres = ImageUtils.order_points(
+            np.asarray(centres, dtype=np.float32)
+        )
+        marker_geometry = self.marker_geometry(ordered_centres)
+        self.log_marker_geometry(ordered_centres, marker_geometry)
+        if self.crop_mode == "axis_aligned":
+            if not self.is_axis_geometry_reliable(marker_geometry):
+                logger.error(
+                    "Pre-rectified marker geometry is not axis-aligned enough; "
+                    "refusing to read a potentially distorted sheet."
+                )
+                return None
+            image = self.crop_axis_aligned(image, ordered_centres)
+            if image is None:
+                logger.error("Axis-aligned marker crop produced an invalid image region.")
+                return None
+        else:
+            image = ImageUtils.four_point_transform(image, ordered_centres)
         # appendSaveImg(1,image_eroded_sub)
         # appendSaveImg(1,image_norm)
 
@@ -295,6 +320,94 @@ class CropOnMarkers(ImagePreprocessor):
         # iterations : Tuned to 2.
         # image_eroded_sub = image_norm - cv2.erode(image_norm, kernel=np.ones((5,5)),iterations=2)
         return image
+
+    @staticmethod
+    def _horizontal_tilt(first, second):
+        angle = abs(degrees(atan2(second[1] - first[1], second[0] - first[0])))
+        return min(angle, abs(180 - angle))
+
+    @staticmethod
+    def _vertical_tilt(first, second):
+        angle = abs(degrees(atan2(second[1] - first[1], second[0] - first[0])))
+        return abs(90 - min(angle, abs(180 - angle)))
+
+    def marker_geometry(self, ordered_centres):
+        tl, tr, br, bl = ordered_centres
+        top_width = float(np.linalg.norm(tr - tl))
+        bottom_width = float(np.linalg.norm(br - bl))
+        left_height = float(np.linalg.norm(bl - tl))
+        right_height = float(np.linalg.norm(br - tr))
+        width_ratio = max(top_width, bottom_width) / max(
+            min(top_width, bottom_width),
+            1.0,
+        )
+        height_ratio = max(left_height, right_height) / max(
+            min(left_height, right_height),
+            1.0,
+        )
+        return {
+            "top_tilt": self._horizontal_tilt(tl, tr),
+            "bottom_tilt": self._horizontal_tilt(bl, br),
+            "left_tilt": self._vertical_tilt(tl, bl),
+            "right_tilt": self._vertical_tilt(tr, br),
+            "width_ratio": width_ratio,
+            "height_ratio": height_ratio,
+        }
+
+    def is_axis_geometry_reliable(self, geometry):
+        return (
+            max(
+                geometry["top_tilt"],
+                geometry["bottom_tilt"],
+                geometry["left_tilt"],
+                geometry["right_tilt"],
+            )
+            <= self.max_axis_tilt_degrees
+            and geometry["width_ratio"] <= self.max_axis_side_ratio
+            and geometry["height_ratio"] <= self.max_axis_side_ratio
+        )
+
+    def log_marker_geometry(self, ordered_centres, geometry):
+        centres_text = ";".join(
+            f"{round(float(point[0]), 1)},{round(float(point[1]), 1)}"
+            for point in ordered_centres
+        )
+        axis_geometry_valid = (
+            self.is_axis_geometry_reliable(geometry)
+            if self.crop_mode == "axis_aligned"
+            else "-"
+        )
+        print(
+            "[OMR marker geometry] "
+            f"crop_mode={self.crop_mode} "
+            f"centres={centres_text} "
+            f"top_tilt_deg={round(geometry['top_tilt'], 2)} "
+            f"bottom_tilt_deg={round(geometry['bottom_tilt'], 2)} "
+            f"left_tilt_deg={round(geometry['left_tilt'], 2)} "
+            f"right_tilt_deg={round(geometry['right_tilt'], 2)} "
+            f"width_ratio={round(geometry['width_ratio'], 4)} "
+            f"height_ratio={round(geometry['height_ratio'], 4)} "
+            f"axis_geometry_valid={axis_geometry_valid}",
+            flush=True,
+        )
+
+    @staticmethod
+    def crop_axis_aligned(image, ordered_centres):
+        """Crop to marker centres without applying another perspective transform."""
+        tl, tr, br, bl = ordered_centres
+        image_height, image_width = image.shape[:2]
+        left = int(round((float(tl[0]) + float(bl[0])) / 2))
+        right = int(round((float(tr[0]) + float(br[0])) / 2))
+        top = int(round((float(tl[1]) + float(tr[1])) / 2))
+        bottom = int(round((float(bl[1]) + float(br[1])) / 2))
+
+        left = max(0, min(image_width - 1, left))
+        right = max(1, min(image_width, right))
+        top = max(0, min(image_height - 1, top))
+        bottom = max(1, min(image_height, bottom))
+        if right - left < 10 or bottom - top < 10:
+            return None
+        return image[top:bottom, left:right].copy()
 
     def load_marker(self, marker_ops, config):
         if not os.path.exists(self.marker_path):

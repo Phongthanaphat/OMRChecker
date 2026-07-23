@@ -53,6 +53,45 @@ def test_marker_cache_reuses_identical_temp_file_contents(tmp_path):
     assert len(_MARKER_CACHE) == 1
 
 
+def test_axis_aligned_marker_crop_does_not_warp_pixels():
+    image = np.arange(100 * 80, dtype=np.int32).reshape((100, 80))
+    centres = np.array(
+        [
+            [10, 20],
+            [70, 22],
+            [68, 82],
+            [12, 80],
+        ],
+        dtype=np.float32,
+    )
+
+    cropped = CropOnMarkers.crop_axis_aligned(image, centres)
+
+    assert cropped is not None
+    assert cropped.shape == (60, 58)
+    assert np.array_equal(cropped, image[21:81, 11:69])
+    assert cropped.base is None
+
+
+def test_axis_aligned_geometry_rejects_skewed_marker_grid():
+    processor = object.__new__(CropOnMarkers)
+    processor.max_axis_tilt_degrees = 3.0
+    processor.max_axis_side_ratio = 1.06
+    skewed_centres = np.array(
+        [
+            [10, 20],
+            [70, 30],
+            [68, 82],
+            [12, 80],
+        ],
+        dtype=np.float32,
+    )
+
+    geometry = processor.marker_geometry(skewed_centres)
+
+    assert processor.is_axis_geometry_reliable(geometry) is False
+
+
 def test_reference_cache_reuses_identical_temp_file_contents(tmp_path):
     _REFERENCE_CACHE.clear()
     source = "templates/50q/reference.png"

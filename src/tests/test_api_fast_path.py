@@ -27,9 +27,66 @@ def test_check_endpoint_declares_template_id_as_multipart_form_field():
     body_param_names = {param.name for param in check_route.dependant.body_params}
     query_param_names = {param.name for param in check_route.dependant.query_params}
 
-    assert {"image", "template_id", "evaluate", "evaluation", "school_id", "exam_id", "require_roll"} <= body_param_names
+    assert {
+        "image",
+        "template_id",
+        "evaluate",
+        "evaluation",
+        "school_id",
+        "exam_id",
+        "require_roll",
+        "pre_rectified",
+    } <= body_param_names
     assert "template_id" not in query_param_names
     assert "evaluate" not in query_param_names
+
+
+def test_pre_rectified_request_disables_alignment_and_perspective_warp():
+    template = {
+        "preProcessors": [
+            {
+                "name": "FeatureBasedAlignment",
+                "options": {"reference": "reference.png"},
+            },
+            {
+                "name": "CropOnMarkers",
+                "options": {"relativePath": "omr_marker.jpg"},
+            },
+        ],
+    }
+
+    configured = api_main._configure_template_for_request(
+        template,
+        pre_rectified=True,
+    )
+
+    assert [item["name"] for item in configured["preProcessors"]] == [
+        "CropOnMarkers",
+    ]
+    assert configured["preProcessors"][0]["options"]["crop_mode"] == "axis_aligned"
+    assert "crop_mode" not in template["preProcessors"][1]["options"]
+
+
+def test_non_rectified_request_preserves_template_preprocessors():
+    template = {
+        "preProcessors": [
+            {
+                "name": "FeatureBasedAlignment",
+                "options": {"reference": "reference.png"},
+            },
+            {
+                "name": "CropOnMarkers",
+                "options": {"relativePath": "omr_marker.jpg"},
+            },
+        ],
+    }
+
+    configured = api_main._configure_template_for_request(
+        template,
+        pre_rectified=False,
+    )
+
+    assert configured == template
 
 
 def test_failed_debug_image_retention_is_opt_in_and_bounded(
@@ -84,6 +141,7 @@ def test_check_endpoint_uses_in_memory_result(monkeypatch):
         school_id="1",
         exam_id="45",
         require_roll=False,
+        pre_rectified=False,
     )
 
     assert response.status_code == 200
@@ -130,6 +188,7 @@ def test_check_endpoint_preserves_processing_error_reason(
             school_id="1",
             exam_id="45",
             require_roll=True,
+            pre_rectified=False,
         )
 
     assert exc_info.value.status_code == 400

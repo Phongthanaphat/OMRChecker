@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from collections import OrderedDict
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -546,6 +547,31 @@ def _get_cached_template_files(template_id: str, template_dir: Path | None = Non
     return out
 
 
+def _configure_template_for_request(
+    template_data: dict,
+    *,
+    pre_rectified: bool,
+) -> dict:
+    """Avoid a second perspective transform for images rectified by the browser."""
+    configured = deepcopy(template_data)
+    if not pre_rectified:
+        return configured
+
+    processors = []
+    for processor in configured.get("preProcessors", []):
+        if processor.get("name") == "FeatureBasedAlignment":
+            continue
+        if processor.get("name") == "CropOnMarkers":
+            processor = deepcopy(processor)
+            processor["options"] = {
+                **processor.get("options", {}),
+                "crop_mode": "axis_aligned",
+            }
+        processors.append(processor)
+    configured["preProcessors"] = processors
+    return configured
+
+
 @app.on_event("startup")
 def warmup_omr_worker() -> None:
     """Warm per-worker imports and template files before the first real scan."""
@@ -638,6 +664,13 @@ def check_omr(
             "where students don't bubble a student code. Default true (backward compatible)."
         ),
     ),
+    pre_rectified: bool = Form(
+        False,
+        description=(
+            "True when the browser already rectified perspective from all four markers. "
+            "The API will validate and crop markers without applying another homography."
+        ),
+    ),
 ):
     """
     Upload an OMR sheet image. Returns responses (Roll, q1, q2, ...).
@@ -648,6 +681,8 @@ def check_omr(
     - school_id (optional): defaults to _unknown if omitted.
     - require_roll (optional, default true): false = ข้าม Roll validation สำหรับ exam โหมด anonymous
       (ตรวจคะแนนอย่างเดียว ไม่ผูกนักเรียน) — Roll ที่อ่านได้จะยังอยู่ใน responses แต่ไม่ถูกบังคับรูปแบบ
+    - pre_rectified (optional, default false): true = ภาพจากกล้องถูกแก้ perspective ที่ browser แล้ว
+      จึงครอปตาม marker แบบแกนตรงและไม่ warp ภาพซ้ำ
 
     Sync `def` (ไม่ใช่ async) โดยตั้งใจ — FastAPI จะรันใน threadpool ทำให้งาน OpenCV
     ที่กิน CPU หนักไม่ block event loop (ไม่งั้น /health และ request อื่นค้างทั้งหมด)
@@ -664,6 +699,7 @@ def check_omr(
     out_dir: Path | None = None
     upload_bytes = 0
     upload_path: Path | None = None
+    pre_rectified = pre_rectified if isinstance(pre_rectified, bool) else False
 
     def mark_timing(name: str) -> None:
         nonlocal timing_stage_started_at
@@ -703,8 +739,19 @@ def check_omr(
 
         # Write template files from cache (avoid second get_template_dir on cache miss)
         cached = _get_cached_template_files(template_id, template_dir)
+        template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
+        request_template = _configure_template_for_request(
+            template_for_roll,
+            pre_rectified=pre_rectified,
+        )
         for name, data in cached.items():
-            (work_dir / name).write_bytes(data)
+            if name == "template.json":
+                (work_dir / name).write_text(
+                    json.dumps(request_template, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            else:
+                (work_dir / name).write_bytes(data)
 
         # Evaluation: from Laravel JSON (priority) or from template
         evaluation_sent = evaluation is not None and evaluation.strip()
@@ -867,7 +914,6 @@ def check_omr(
                 detail="Not a valid OMR sheet: marker(s) not found in one or more corners. All four corner markers must be visible. Please upload a clear OMR answer sheet.",
             )
 
-        template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
         warnings = []
         # โหมด anonymous (require_roll=false): ไม่บังคับ Roll — นักเรียนไม่ฝนรหัส ใบยังตรวจได้ปกติ
         # โหมด student (require_roll=true): รับเฉพาะเลข 2-5 หลัก; 2-4 หลักตรวจต่อพร้อม warning เพื่อให้ Laravel รอแก้รหัส
@@ -992,6 +1038,7 @@ def check_omr(
             f"pid={worker_pid} "
             f"status={status_code if status_code is not None else '-'} "
             f"template_id={template_id} "
+            f"pre_rectified={pre_rectified} "
             f"upload_bytes={upload_bytes} "
             f"input_width={input_dimensions[0] if input_dimensions else '-'} "
             f"input_height={input_dimensions[1] if input_dimensions else '-'} "

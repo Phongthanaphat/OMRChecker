@@ -90,6 +90,12 @@ TEMPLATE_SCHEMA = {
                                     "additionalProperties": False,
                                     "properties": {
                                         "apply_erode_subtract": {"type": "boolean"},
+                                        "crop_mode": {
+                                            "type": "string",
+                                            "enum": ["perspective", "axis_aligned"],
+                                        },
+                                        "max_axis_side_ratio": {"type": "number"},
+                                        "max_axis_tilt_degrees": {"type": "number"},
                                         "fallback_marker_rescale_range": two_positive_numbers,
                                         "fallback_marker_rescale_steps": {"type": "number"},
                                         "marker_rescale_fallback": {"type": "boolean"},
