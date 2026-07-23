@@ -607,21 +607,69 @@ class ImageInstanceOps:
                 continue
             inner_mean = float(np.mean(inner))
             dark_ratio = float(np.mean(inner < 155))
-            scores.append((inner_mean, dark_ratio, bubble))
+            roi_x1 = max(0, min(cols, x))
+            roi_x2 = max(0, min(cols, x + box_w))
+            roi_y1 = max(0, min(rows, y))
+            roi_y2 = max(0, min(rows, y + box_h))
+            roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
+            corner_h = max(2, int(roi.shape[0] * 0.18))
+            corner_w = max(2, int(roi.shape[1] * 0.18))
+            corner_pixels = np.concatenate(
+                [
+                    roi[:corner_h, :corner_w].ravel(),
+                    roi[:corner_h, -corner_w:].ravel(),
+                    roi[-corner_h:, :corner_w].ravel(),
+                    roi[-corner_h:, -corner_w:].ravel(),
+                ]
+            )
+            background_level = float(np.percentile(corner_pixels, 75))
+            local_contrast = background_level - inner_mean
+            local_dark_ratio = float(np.mean(inner < background_level - 25))
+            scores.append(
+                {
+                    "inner_mean": inner_mean,
+                    "dark_ratio": dark_ratio,
+                    "local_contrast": local_contrast,
+                    "local_dark_ratio": local_dark_ratio,
+                    "bubble": bubble,
+                }
+            )
 
         if len(scores) < 2:
             return None
-        scores.sort(key=lambda item: item[0])
-        best_mean, best_dark_ratio, best_bubble = scores[0]
-        second_mean = scores[1][0]
-        median_mean = float(np.median([s[0] for s in scores]))
-        spread = float(np.std([s[0] for s in scores]))
-        accepted = (
+        raw_scores = sorted(scores, key=lambda item: item["inner_mean"])
+        best_raw = raw_scores[0]
+        best_mean = best_raw["inner_mean"]
+        best_dark_ratio = best_raw["dark_ratio"]
+        second_mean = raw_scores[1]["inner_mean"]
+        median_mean = float(np.median([s["inner_mean"] for s in scores]))
+        spread = float(np.std([s["inner_mean"] for s in scores]))
+        raw_accepted = (
             best_dark_ratio >= 0.16
             and median_mean - best_mean >= 16
             and second_mean - best_mean >= 8
             and spread >= 7
         )
+
+        local_scores = sorted(
+            scores,
+            key=lambda item: item["local_contrast"],
+            reverse=True,
+        )
+        best_local = local_scores[0]
+        second_local_contrast = local_scores[1]["local_contrast"]
+        median_local_contrast = float(
+            np.median([s["local_contrast"] for s in scores])
+        )
+        local_accepted = (
+            best_local["local_contrast"] >= 18
+            and best_local["local_dark_ratio"] >= 0.14
+            and best_local["local_contrast"] - second_local_contrast >= 5
+            and best_local["local_contrast"] - median_local_contrast >= 8
+        )
+        accepted = raw_accepted or local_accepted
+        selected = best_raw if raw_accepted else best_local
+
         logger.info(
             "[OMR Roll diagnostic] "
             f"slot={first.field_label} "
@@ -631,11 +679,16 @@ class ImageInstanceOps:
             f"median_gap={median_mean - best_mean:.2f} "
             f"second_gap={second_mean - best_mean:.2f} "
             f"spread={spread:.2f} "
+            f"local_contrast={best_local['local_contrast']:.2f} "
+            f"local_dark_ratio={best_local['local_dark_ratio']:.3f} "
+            f"local_second_gap={best_local['local_contrast'] - second_local_contrast:.2f} "
+            f"local_median_gap={best_local['local_contrast'] - median_local_contrast:.2f} "
+            f"accepted_by={'raw' if raw_accepted else 'local' if local_accepted else 'none'} "
             f"accepted={accepted}"
         )
 
         if accepted:
-            return best_bubble
+            return selected["bubble"]
         return None
 
     @staticmethod

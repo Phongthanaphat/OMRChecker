@@ -51,3 +51,48 @@ def test_inner_darkness_fallback_does_not_guess_blank_roll_digit():
     )
 
     assert detected is None
+
+
+def test_inner_darkness_fallback_uses_local_contrast_under_uneven_shadow():
+    image = np.full((240, 80), 230, dtype=np.uint8)
+    bubbles = make_roll_bubbles()
+
+    # Darken lower rows progressively to simulate a page shadow.
+    for row in range(image.shape[0]):
+        image[row, :] = max(150, 230 - row // 3)
+
+    marked = bubbles[2]
+    image[
+        marked.y + 5 : marked.y + 15,
+        marked.x + 4 : marked.x + 12,
+    ] = 95
+
+    detected = ImageInstanceOps.detect_int_bubble_by_inner_darkness(
+        image,
+        bubbles,
+        box_w=20,
+        box_h=20,
+        shift=0,
+        detected_bubbles=[],
+    )
+
+    assert detected is marked
+
+
+def test_inner_darkness_fallback_does_not_guess_from_shadow_alone():
+    image = np.full((240, 80), 230, dtype=np.uint8)
+    bubbles = make_roll_bubbles()
+
+    for row in range(image.shape[0]):
+        image[row, :] = max(150, 230 - row // 3)
+
+    detected = ImageInstanceOps.detect_int_bubble_by_inner_darkness(
+        image,
+        bubbles,
+        box_w=20,
+        box_h=20,
+        shift=0,
+        detected_bubbles=[],
+    )
+
+    assert detected is None
