@@ -44,6 +44,22 @@ def fake_entry_point_with_roll(roll):
     return fake_entry_point
 
 
+def fake_fast_entry_point_with_roll(roll):
+    def fake_entry_point(_work_dir, _omr_args):
+        return {
+            "file_id": "upload.jpg",
+            "input_path": "upload.jpg",
+            "output_path": "upload.jpg",
+            "score": 10,
+            "responses": {
+                "Roll": roll,
+                "q1": "A",
+            },
+        }
+
+    return fake_entry_point
+
+
 def test_roll_warning_is_returned_for_short_student_code():
     row = pd.Series({"Roll": "33"})
 
@@ -141,6 +157,32 @@ def test_check_endpoint_returns_warning_instead_of_rejecting_short_roll(monkeypa
     payload = json.loads(response.body)
     assert payload["responses"]["Roll"] == "33"
     assert payload["warnings"][0]["code"] == "incomplete_roll"
+
+
+def test_check_endpoint_validates_roll_from_fast_path_responses(monkeypatch):
+    monkeypatch.setattr(
+        api_main,
+        "entry_point",
+        fake_fast_entry_point_with_roll("12398"),
+    )
+    upload = UploadFile(
+        filename="sheet.jpg",
+        file=BytesIO(b"fake-image"),
+    )
+
+    response = api_main.check_omr(
+        image=upload,
+        template_id="20q",
+        evaluation=None,
+        school_id=None,
+        exam_id="45",
+        require_roll=True,
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["responses"]["Roll"] == "12398"
+    assert "warnings" not in payload
 
 
 def test_check_endpoint_warns_for_four_digit_roll_on_five_slot_template(monkeypatch):

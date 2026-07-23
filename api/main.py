@@ -15,6 +15,7 @@ import sys
 import tempfile
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -393,12 +394,15 @@ def _persist_checked_image_optimized(checked_src: Path, persistent_dest: Path) -
     raise OSError("Failed to encode checked image")
 
 
-def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | None:
+def _roll_warning_if_configured(
+    template_json: dict,
+    responses: Mapping[str, object],
+) -> dict | None:
     """Return a warning when Roll is usable for scoring but not complete enough to bind."""
     max_slots = _roll_slot_count(template_json)
     if max_slots is None:
         return None
-    roll = str(row.get("Roll", "")).strip()
+    roll = str(responses.get("Roll", "")).strip()
     if roll and roll.isdigit() and len(roll) == max_slots:
         return None
     return {
@@ -419,12 +423,15 @@ def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | N
     }
 
 
-def _reject_unreliable_roll_if_configured(template_json: dict, row: pd.Series) -> None:
+def _reject_unreliable_roll_if_configured(
+    template_json: dict,
+    responses: Mapping[str, object],
+) -> None:
     """Reject Roll reads outside the processable range: 2..N digits."""
     max_slots = _roll_slot_count(template_json)
     if max_slots is None:
         return
-    roll = str(row.get("Roll", "")).strip()
+    roll = str(responses.get("Roll", "")).strip()
     if roll.isdigit() and ROLL_VALIDATION_MIN_LEN <= len(roll) <= max_slots:
         return
     reason = "blank" if not roll else f"{len(roll)} characters"
@@ -826,8 +833,8 @@ def check_omr(
         # โหมด anonymous (require_roll=false): ไม่บังคับ Roll — นักเรียนไม่ฝนรหัส ใบยังตรวจได้ปกติ
         # โหมด student (require_roll=true): รับเฉพาะเลข 2-5 หลัก; 2-4 หลักตรวจต่อพร้อม warning เพื่อให้ Laravel รอแก้รหัส
         if require_roll:
-            _reject_unreliable_roll_if_configured(template_for_roll, row)
-            roll_warning = _roll_warning_if_configured(template_for_roll, row)
+            _reject_unreliable_roll_if_configured(template_for_roll, responses)
+            roll_warning = _roll_warning_if_configured(template_for_roll, responses)
             if roll_warning:
                 warnings.append(roll_warning)
 
