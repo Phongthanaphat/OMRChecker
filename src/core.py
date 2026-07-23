@@ -37,6 +37,7 @@ class ImageInstanceOps:
         timings_ms = {}
         started_at = perf_counter()
         marker_fallback_image = None
+        pending_feature_alignment = None
         # resize to conform to template
         in_omr = ImageUtils.resize_util(
             in_omr,
@@ -50,36 +51,89 @@ class ImageInstanceOps:
             processor_name = pre_processor.__class__.__name__
             if processor_name == "FeatureBasedAlignment":
                 marker_fallback_image = in_omr.copy()
+                pending_feature_alignment = pre_processor
+                continue
 
             processor_started_at = perf_counter()
-            processed_image = pre_processor.apply_filter(in_omr, file_path)
-            timings_ms[processor_name] = round(
-                (perf_counter() - processor_started_at) * 1000, 2
-            )
-
             if (
-                processed_image is None
-                and processor_name == "CropOnMarkers"
+                processor_name == "CropOnMarkers"
                 and marker_fallback_image is not None
+                and pending_feature_alignment is not None
             ):
-                fallback_started_at = perf_counter()
                 processed_image = pre_processor.apply_filter(
                     marker_fallback_image.copy(),
                     file_path,
                 )
-                timings_ms["CropOnMarkersFallback"] = round(
-                    (perf_counter() - fallback_started_at) * 1000,
+                timings_ms["CropOnMarkersRaw"] = round(
+                    (perf_counter() - processor_started_at) * 1000,
                     2,
                 )
-                if processed_image is not None:
-                    logger.info(
-                        "Marker detection recovered by retrying the image before "
-                        "feature-based alignment."
+                if processed_image is None:
+                    alignment_started_at = perf_counter()
+                    aligned_image = pending_feature_alignment.apply_filter(
+                        marker_fallback_image.copy(),
+                        file_path,
                     )
+                    timings_ms["FeatureBasedAlignmentFallback"] = round(
+                        (perf_counter() - alignment_started_at) * 1000,
+                        2,
+                    )
+                    fallback_started_at = perf_counter()
+                    processed_image = (
+                        pre_processor.apply_filter(aligned_image, file_path)
+                        if aligned_image is not None
+                        else None
+                    )
+                    timings_ms["CropOnMarkersAlignedFallback"] = round(
+                        (perf_counter() - fallback_started_at) * 1000,
+                        2,
+                    )
+                    if processed_image is not None:
+                        print(
+                            "[OMR preprocess path] "
+                            "marker_source=feature_aligned_fallback",
+                            flush=True,
+                        )
+                        logger.info(
+                            "Raw marker detection failed; recovered after "
+                            "feature-based alignment."
+                        )
+                else:
+                    print(
+                        "[OMR preprocess path] marker_source=raw",
+                        flush=True,
+                    )
+                    logger.info(
+                        "Marker crop used the image before feature-based alignment."
+                    )
+                pending_feature_alignment = None
+            else:
+                if pending_feature_alignment is not None:
+                    alignment_started_at = perf_counter()
+                    in_omr = pending_feature_alignment.apply_filter(in_omr, file_path)
+                    timings_ms["FeatureBasedAlignment"] = round(
+                        (perf_counter() - alignment_started_at) * 1000,
+                        2,
+                    )
+                    pending_feature_alignment = None
+                    if in_omr is None:
+                        break
+                processed_image = pre_processor.apply_filter(in_omr, file_path)
+                timings_ms[processor_name] = round(
+                    (perf_counter() - processor_started_at) * 1000,
+                    2,
+                )
 
             in_omr = processed_image
             if in_omr is None:
                 break
+        if pending_feature_alignment is not None:
+            alignment_started_at = perf_counter()
+            in_omr = pending_feature_alignment.apply_filter(in_omr, file_path)
+            timings_ms["FeatureBasedAlignment"] = round(
+                (perf_counter() - alignment_started_at) * 1000,
+                2,
+            )
         timings_ms["total"] = round((perf_counter() - started_at) * 1000, 2)
         print(
             "[OMR preprocess timing] "
