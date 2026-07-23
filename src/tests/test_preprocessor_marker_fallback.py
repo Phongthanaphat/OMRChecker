@@ -18,12 +18,20 @@ class CropOnMarkers:
     def __init__(self, fail_raw=False):
         self.inputs = []
         self.fail_raw = fail_raw
+        self.shadow_fallback_count = 0
 
     def apply_filter(self, image, _file_path):
         self.inputs.append(image.copy())
         if self.fail_raw and int(image[0, 0]) == 0:
             return None
         return image + 1
+
+    def should_retry_with_shadow_correction(self, _image):
+        return self.fail_raw
+
+    def apply_shadow_fallback(self, image, _file_path):
+        self.shadow_fallback_count += 1
+        return image + 2
 
 
 def make_ops_and_template(monkeypatch, marker_processor):
@@ -76,3 +84,26 @@ def test_marker_detection_uses_aligned_fallback_when_raw_detection_fails(
     assert int(marker_processor.inputs[1][0, 0]) == 10
     assert alignment_processor.call_count == 1
     assert int(result[0, 0]) == 11
+
+
+def test_direct_marker_detection_uses_shadow_fallback_once(monkeypatch):
+    marker_processor = CropOnMarkers(fail_raw=True)
+    config = SimpleNamespace(
+        outputs=SimpleNamespace(save_image_level=0),
+        dimensions=SimpleNamespace(processing_width=2, processing_height=2),
+    )
+    ops = ImageInstanceOps(config)
+    template = SimpleNamespace(pre_processors=[marker_processor])
+    monkeypatch.setattr(
+        "src.core.ImageUtils.resize_util",
+        lambda source, _width, _height: source.copy(),
+    )
+
+    result = ops.apply_preprocessors(
+        "sheet.jpg",
+        np.zeros((2, 2), dtype=np.uint8),
+        template,
+    )
+
+    assert marker_processor.shadow_fallback_count == 1
+    assert int(result[0, 0]) == 2

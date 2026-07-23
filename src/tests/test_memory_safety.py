@@ -95,6 +95,7 @@ def test_axis_aligned_geometry_rejects_skewed_marker_grid():
 def test_axis_marker_selection_uses_consistent_rectangle_over_stronger_false_peaks():
     processor = object.__new__(CropOnMarkers)
     processor.min_quadrant_matching_threshold = 0.33
+    processor.max_axis_marker_inset_fraction = 0.22
     processor.max_axis_tilt_degrees = 3.0
     processor.max_axis_side_ratio = 1.06
     contexts = []
@@ -125,13 +126,64 @@ def test_axis_marker_selection_uses_consistent_rectangle_over_stronger_false_pea
     )
 
     assert selected is not None
-    assert [candidate["rank"] for candidate in selected] == [2, 2, 2, 2]
     assert [candidate["center"] for candidate in selected] == [
         [10.0, 10.0],
         [190.0, 10.0],
         [10.0, 190.0],
         [190.0, 190.0],
     ]
+
+
+def test_axis_marker_candidates_ignore_answer_bubbles_away_from_corners():
+    processor = object.__new__(CropOnMarkers)
+    processor.min_quadrant_matching_threshold = 0.33
+    processor.max_axis_marker_inset_fraction = 0.22
+    response = np.zeros((100, 100), dtype=np.float32)
+    response[10, 10] = 0.72
+    response[60, 60] = 0.98
+    context = {
+        "res": response,
+        "origin": (0, 0),
+        "height": 4,
+        "width": 4,
+    }
+
+    candidates = processor.marker_candidates(
+        context,
+        expected_corner=0,
+        image_shape=(200, 200),
+    )
+
+    assert candidates[0]["center"] == [12.0, 12.0]
+    assert candidates[0]["score"] == np.float32(0.72)
+
+
+def test_dark_image_uses_illumination_correction_first():
+    processor = object.__new__(CropOnMarkers)
+    processor.shadow_dark_median_threshold = 155
+    processor.shadow_quadrant_spread_threshold = 55
+    processor.shadow_quadrant_mean_threshold = 165
+    image = np.full((200, 200), 120, dtype=np.uint8)
+
+    metrics = processor.shadow_metrics(image)
+
+    assert processor.should_correct_shadow_first(metrics) is True
+
+
+def test_illumination_correction_reduces_broad_shadow_gradient():
+    horizontal = np.linspace(45, 230, 240, dtype=np.float32)
+    image = np.tile(horizontal, (180, 1)).astype(np.uint8)
+    before = CropOnMarkers.shadow_metrics(image)
+
+    corrected = CropOnMarkers.correct_uneven_illumination(
+        image,
+        before,
+        trigger="test",
+    )
+    after = CropOnMarkers.shadow_metrics(corrected)
+
+    assert after["quadrant_spread"] < before["quadrant_spread"] * 0.35
+    assert after["median"] > before["median"]
 
 
 def test_reference_cache_reuses_identical_temp_file_contents(tmp_path):

@@ -123,6 +123,21 @@ class ImageInstanceOps:
                     (perf_counter() - processor_started_at) * 1000,
                     2,
                 )
+                if (
+                    processed_image is None
+                    and processor_name == "CropOnMarkers"
+                    and hasattr(pre_processor, "should_retry_with_shadow_correction")
+                    and pre_processor.should_retry_with_shadow_correction(in_omr)
+                ):
+                    shadow_started_at = perf_counter()
+                    processed_image = pre_processor.apply_shadow_fallback(
+                        in_omr,
+                        file_path,
+                    )
+                    timings_ms["CropOnMarkersShadowFallback"] = round(
+                        (perf_counter() - shadow_started_at) * 1000,
+                        2,
+                    )
 
             in_omr = processed_image
             if in_omr is None:

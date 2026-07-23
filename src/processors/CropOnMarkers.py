@@ -2,6 +2,7 @@ from collections import OrderedDict
 from itertools import product
 from math import atan2, degrees
 import os
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -71,6 +72,34 @@ class CropOnMarkers(ImagePreprocessor):
         self.max_axis_side_ratio = float(
             marker_ops.get("max_axis_side_ratio", 1.06)
         )
+        self.max_axis_marker_inset_fraction = float(
+            marker_ops.get("max_axis_marker_inset_fraction", 0.22)
+        )
+        self.enable_shadow_fallback = bool(
+            marker_ops.get(
+                "enable_shadow_fallback",
+                self.crop_mode == "axis_aligned",
+            )
+        )
+        self.shadow_dark_median_threshold = float(
+            marker_ops.get("shadow_dark_median_threshold", 155)
+        )
+        self.shadow_retry_median_threshold = float(
+            marker_ops.get("shadow_retry_median_threshold", 180)
+        )
+        self.shadow_quadrant_spread_threshold = float(
+            marker_ops.get("shadow_quadrant_spread_threshold", 55)
+        )
+        self.shadow_retry_quadrant_spread_threshold = float(
+            marker_ops.get("shadow_retry_quadrant_spread_threshold", 35)
+        )
+        self.shadow_quadrant_mean_threshold = float(
+            marker_ops.get("shadow_quadrant_mean_threshold", 165)
+        )
+        self.shadow_retry_quadrant_mean_threshold = float(
+            marker_ops.get("shadow_retry_quadrant_mean_threshold", 175)
+        )
+        self.used_shadow_correction = False
         self.marker = self.load_marker(marker_ops, config)
 
     def __str__(self):
@@ -82,6 +111,16 @@ class CropOnMarkers(ImagePreprocessor):
     def apply_filter(self, image, file_path):
         config = self.tuning_config
         image_instance_ops = self.image_instance_ops
+        self.used_shadow_correction = False
+        if self.enable_shadow_fallback:
+            metrics = self.shadow_metrics(image)
+            if self.should_correct_shadow_first(metrics):
+                image = self.correct_uneven_illumination(
+                    image,
+                    metrics,
+                    trigger="dark_first_pass",
+                )
+                self.used_shadow_correction = True
         image_eroded_sub = ImageUtils.normalize_util(
             image
             if self.apply_erode_subtract
@@ -350,12 +389,131 @@ class CropOnMarkers(ImagePreprocessor):
         # image_eroded_sub = image_norm - cv2.erode(image_norm, kernel=np.ones((5,5)),iterations=2)
         return image
 
-    def marker_candidates(self, match_context, limit=6):
+    @staticmethod
+    def shadow_metrics(image):
+        """Measure darkness and uneven lighting cheaply on a sampled image."""
+        sampled = image[::4, ::4]
+        height, width = sampled.shape[:2]
+        quadrants = (
+            sampled[: height // 2, : width // 2],
+            sampled[: height // 2, width // 2 :],
+            sampled[height // 2 :, : width // 2],
+            sampled[height // 2 :, width // 2 :],
+        )
+        quadrant_means = [float(np.mean(quadrant)) for quadrant in quadrants]
+        return {
+            "median": float(np.median(sampled)),
+            "min_quadrant_mean": min(quadrant_means),
+            "quadrant_spread": max(quadrant_means) - min(quadrant_means),
+        }
+
+    def should_correct_shadow_first(self, metrics):
+        return (
+            metrics["median"] < self.shadow_dark_median_threshold
+            or (
+                metrics["quadrant_spread"]
+                >= self.shadow_quadrant_spread_threshold
+                and metrics["min_quadrant_mean"]
+                < self.shadow_quadrant_mean_threshold
+            )
+        )
+
+    def should_retry_with_shadow_correction(self, image):
+        if not self.enable_shadow_fallback or self.used_shadow_correction:
+            return False
+        metrics = self.shadow_metrics(image)
+        return (
+            metrics["median"] < self.shadow_retry_median_threshold
+            or (
+                metrics["quadrant_spread"]
+                >= self.shadow_retry_quadrant_spread_threshold
+                and metrics["min_quadrant_mean"]
+                < self.shadow_retry_quadrant_mean_threshold
+            )
+        )
+
+    @staticmethod
+    def correct_uneven_illumination(
+        image,
+        metrics,
+        *,
+        trigger,
+    ):
+        """Flatten broad shadows while preserving the marker's local strokes."""
+        started_at = perf_counter()
+        height, width = image.shape[:2]
+        reduced = cv2.resize(
+            image,
+            (max(1, width // 2), max(1, height // 2)),
+            interpolation=cv2.INTER_AREA,
+        )
+        reduced_background = cv2.GaussianBlur(reduced, (0, 0), sigmaX=12.5)
+        background = cv2.resize(
+            reduced_background,
+            (width, height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        divided = cv2.divide(image, background, scale=245)
+        corrected = cv2.createCLAHE(
+            clipLimit=2.0,
+            tileGridSize=(8, 8),
+        ).apply(divided)
+        print(
+            "[OMR marker illumination] "
+            f"trigger={trigger} "
+            f"median={metrics['median']:.2f} "
+            f"min_quadrant_mean={metrics['min_quadrant_mean']:.2f} "
+            f"quadrant_spread={metrics['quadrant_spread']:.2f} "
+            f"correction_ms={(perf_counter() - started_at) * 1000:.2f}",
+            flush=True,
+        )
+        return corrected
+
+    def apply_shadow_fallback(self, image, file_path):
+        metrics = self.shadow_metrics(image)
+        corrected = self.correct_uneven_illumination(
+            image,
+            metrics,
+            trigger="normal_detection_failed",
+        )
+        result = self.apply_filter(corrected, file_path)
+        self.used_shadow_correction = True
+        return result
+
+    def marker_candidates(
+        self,
+        match_context,
+        limit=6,
+        *,
+        expected_corner=None,
+        image_shape=None,
+    ):
         """Return distinct local maxima from one quadrant's template response."""
         response = match_context["res"].copy()
         origin_x, origin_y = match_context["origin"]
         marker_h = int(match_context["height"])
         marker_w = int(match_context["width"])
+        if expected_corner is not None and image_shape is not None:
+            image_height, image_width = image_shape[:2]
+            inset_x = image_width * self.max_axis_marker_inset_fraction
+            inset_y = image_height * self.max_axis_marker_inset_fraction
+            center_offset_x = origin_x + marker_w / 2
+            center_offset_y = origin_y + marker_h / 2
+
+            if expected_corner in (0, 2):
+                last_x = int(np.floor(inset_x - center_offset_x))
+                response[:, max(0, last_x + 1) :] = -1
+            else:
+                first_x = int(np.ceil(image_width - inset_x - center_offset_x))
+                response[:, : max(0, first_x)] = -1
+
+            if expected_corner in (0, 1):
+                last_y = int(np.floor(inset_y - center_offset_y))
+                response[max(0, last_y + 1) :, :] = -1
+            else:
+                first_y = int(np.ceil(image_height - inset_y - center_offset_y))
+                response[: max(0, first_y), :] = -1
+
         suppression_radius = max(2, int(round(max(marker_h, marker_w) * 0.75)))
         candidates = []
 
@@ -390,10 +548,18 @@ class CropOnMarkers(ImagePreprocessor):
 
     def select_axis_aligned_marker_candidates(self, match_contexts, image_shape):
         """Choose four matches that form one large, straight marker rectangle."""
-        top_candidates = [
-            self.marker_candidates(context, limit=1)[0]
-            for context in match_contexts
+        candidate_groups = [
+            self.marker_candidates(
+                context,
+                expected_corner=index,
+                image_shape=image_shape,
+            )
+            for index, context in enumerate(match_contexts)
         ]
+        if any(not candidates for candidates in candidate_groups):
+            return None
+
+        top_candidates = [candidates[0] for candidates in candidate_groups]
         top_result = self.score_axis_marker_selection(
             top_candidates,
             image_shape,
@@ -407,13 +573,6 @@ class CropOnMarkers(ImagePreprocessor):
                 top_geometry,
             )
             return top_candidates
-
-        candidate_groups = [
-            self.marker_candidates(context)
-            for context in match_contexts
-        ]
-        if any(not candidates for candidates in candidate_groups):
-            return None
 
         image_height, image_width = image_shape[:2]
         best_selection = None
