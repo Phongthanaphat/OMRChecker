@@ -743,43 +743,65 @@ def check_omr(
             "autoAlign": False,
             "skip_config_table": True,  # skip Rich table when called from API (faster, less log noise)
             "single_file": str(upload_path),
+            "return_result": True,
         }
         try:
-            entry_point(Path(work_dir), omr_args)
+            entry_result = entry_point(Path(work_dir), omr_args)
         except ValueError as e:
             # e.g. empty string / null in answers_in_order from Laravel evaluation JSON
             raise HTTPException(status_code=400, detail=str(e)) from e
         mark_timing("entry_point")
 
-        # Results CSV มีเมื่อ OMR ผ่าน marker check (เจอ marker ครบทั้ง 4 มุม)
-        # ถ้าไม่เจอ marker แม้แต่มุมเดียว → CropOnMarkers return None → ไฟล์ไป ErrorFiles → ไม่มีแถวใน Results
-        results_glob = out_dir / "scans" / "Results" / "Results_*.csv"
-        csv_files = sorted(glob.glob(str(results_glob)))
-        if not csv_files:
-            raise HTTPException(
-                status_code=400,
-                detail="Not a valid OMR sheet: marker(s) not found in one or more corners. All four corner markers must be visible. Please upload a clear OMR answer sheet.",
-            )
-
-        # Read as strings to preserve leading zeros (e.g. Roll "01234").
-        df = pd.read_csv(csv_files[0], dtype=str, keep_default_na=False)
-        if df.empty:
-            raise HTTPException(
-                status_code=400,
-                detail="Not a valid OMR sheet: marker(s) not found in one or more corners. All four corner markers must be visible. Please upload a clear OMR answer sheet.",
-            )
-
-        # First row is our upload (only one image)
-        row = df.iloc[0]
-        file_id = str(row.get("file_id", upload_path.name))
+        row = None
         score = None
-        if "score" in df.columns:
-            raw_score = str(row.get("score", "")).strip()
-            if raw_score != "":
+        responses = None
+        if isinstance(entry_result, dict):
+            row = entry_result
+            file_id = str(row.get("file_id", upload_path.name))
+            raw_score = row.get("score")
+            if raw_score is not None and str(raw_score).strip() != "":
                 try:
                     score = float(raw_score)
-                except ValueError:
+                except (TypeError, ValueError):
                     score = None
+            raw_responses = row.get("responses")
+            if isinstance(raw_responses, dict):
+                responses = {
+                    str(key): str(value) if value is not None else ""
+                    for key, value in raw_responses.items()
+                }
+        else:
+            # Compatibility fallback for older entry points and test doubles.
+            results_glob = out_dir / "scans" / "Results" / "Results_*.csv"
+            csv_files = sorted(glob.glob(str(results_glob)))
+            if csv_files:
+                df = pd.read_csv(csv_files[0], dtype=str, keep_default_na=False)
+                if not df.empty:
+                    row = df.iloc[0]
+                    file_id = str(row.get("file_id", upload_path.name))
+                    if "score" in df.columns:
+                        raw_score = str(row.get("score", "")).strip()
+                        if raw_score != "":
+                            try:
+                                score = float(raw_score)
+                            except ValueError:
+                                score = None
+                    response_cols = [
+                        column
+                        for column in df.columns
+                        if column
+                        not in ("file_id", "input_path", "output_path", "score")
+                    ]
+                    responses = {
+                        column: str(row.get(column, ""))
+                        for column in response_cols
+                    }
+
+        if row is None or responses is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Not a valid OMR sheet: marker(s) not found in one or more corners. All four corner markers must be visible. Please upload a clear OMR answer sheet.",
+            )
 
         template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
         warnings = []
@@ -790,10 +812,6 @@ def check_omr(
             roll_warning = _roll_warning_if_configured(template_for_roll, row)
             if roll_warning:
                 warnings.append(roll_warning)
-
-        # Build responses dict from template columns (file_id, input_path, output_path, score, then Roll, q1, ...)
-        response_cols = [c for c in df.columns if c not in ("file_id", "input_path", "output_path", "score")]
-        responses = {c: str(row.get(c, "")) for c in response_cols}
 
         # Optional: evaluation detail CSV (when evaluation was used)
         evaluation_rows = []

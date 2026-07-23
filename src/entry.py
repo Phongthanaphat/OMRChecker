@@ -108,15 +108,21 @@ def process_single_file(root_dir, file_path, args):
     output_dir = Path(args["output_dir"], file_path.parent.relative_to(root_dir))
     paths = Paths(output_dir)
     setup_dirs_for_paths(paths)
-    outputs_namespace = setup_outputs_for_template(paths, template)
+    return_result = bool(args.get("return_result"))
+    outputs_namespace = setup_outputs_for_template(
+        paths,
+        template,
+        write_csv=not return_result,
+    )
     mark_timing("setup_outputs")
 
-    process_files(
+    processing_results = process_files(
         [file_path],
         template,
         tuning_config,
         evaluation_config,
         outputs_namespace,
+        collect_results=return_result,
     )
     mark_timing("process_files")
 
@@ -133,6 +139,9 @@ def process_single_file(root_dir, file_path, args):
         f"total_ms={timings_ms.get('total')}",
         flush=True,
     )
+    if return_result and processing_results:
+        return processing_results[0]
+    return None
 
 
 def print_config_summary(
@@ -332,6 +341,7 @@ def process_files(
     tuning_config,
     evaluation_config,
     outputs_namespace,
+    collect_results=False,
 ):
     start_time = int(time())
     timing_started_at = perf_counter()
@@ -346,6 +356,7 @@ def process_files(
         timing_stage_started_at = now
 
     files_counter = 0
+    processing_results = []
     STATS.files_not_moved = 0
 
     for file_path in omr_files:
@@ -377,7 +388,10 @@ def process_files(
             outputs_namespace.OUTPUT_SET.append(
                 [file_name] + outputs_namespace.empty_resp
             )
-            if check_and_move(ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path):
+            if (
+                not collect_results
+                and check_and_move(ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path)
+            ):
                 err_line = [
                     file_name,
                     file_path,
@@ -459,22 +473,42 @@ def process_files(
         if multi_marked == 0 or not tuning_config.outputs.filter_out_multimarked_files:
             STATS.files_not_moved += 1
             new_file_path = save_dir.joinpath(file_id)
-            # Enter into Results sheet-
-            results_line = [file_name, file_path, new_file_path, score] + resp_array
-            # Write/Append to results_line file(opened in append mode)
-            pd.DataFrame(results_line, dtype=str).T.to_csv(
-                outputs_namespace.files_obj["Results"],
-                mode="a",
-                quoting=QUOTE_NONNUMERIC,
-                header=False,
-                index=False,
-            )
+            if collect_results:
+                processing_results.append(
+                    {
+                        "file_id": file_name,
+                        "input_path": str(file_path),
+                        "output_path": str(new_file_path),
+                        "score": float(score),
+                        "responses": {
+                            key: omr_response[key] for key in template.output_columns
+                        },
+                    }
+                )
+            else:
+                # Enter into Results sheet-
+                results_line = [file_name, file_path, new_file_path, score] + resp_array
+                # Write/Append to results_line file(opened in append mode)
+                pd.DataFrame(results_line, dtype=str).T.to_csv(
+                    outputs_namespace.files_obj["Results"],
+                    mode="a",
+                    quoting=QUOTE_NONNUMERIC,
+                    header=False,
+                    index=False,
+                )
             mark_timing("write_results")
         else:
             # multi_marked file
             logger.info(f"[{files_counter}] Found multi-marked file: '{file_id}'")
             new_file_path = outputs_namespace.paths.multi_marked_dir.joinpath(file_name)
-            if check_and_move(ERROR_CODES.MULTI_BUBBLE_WARN, file_path, new_file_path):
+            if (
+                not collect_results
+                and check_and_move(
+                    ERROR_CODES.MULTI_BUBBLE_WARN,
+                    file_path,
+                    new_file_path,
+                )
+            ):
                 mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
                 pd.DataFrame(mm_line, dtype=str).T.to_csv(
                     outputs_namespace.files_obj["MultiMarked"],
@@ -504,6 +538,7 @@ def process_files(
     )
 
     print_stats(start_time, files_counter, tuning_config)
+    return processing_results
 
 
 def check_and_move(error_code, file_path, filepath2):

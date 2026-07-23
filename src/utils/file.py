@@ -51,7 +51,7 @@ def setup_dirs_for_paths(paths):
             os.makedirs(save_output_dir)
 
 
-def setup_outputs_for_template(paths, template):
+def setup_outputs_for_template(paths, template, write_csv=True):
     # TODO: consider moving this into a class instance
     ns = argparse.Namespace()
     logger.info("Checking Files...")
@@ -74,6 +74,9 @@ def setup_outputs_for_template(paths, template):
         "MultiMarked": os.path.join(paths.manual_dir, "MultiMarkedFiles.csv"),
         "Errors": os.path.join(paths.manual_dir, "ErrorFiles.csv"),
     }
+
+    if not write_csv:
+        return ns
 
     for file_key, file_name in ns.filesMap.items():
         if not os.path.exists(file_name):
