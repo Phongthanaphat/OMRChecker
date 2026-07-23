@@ -388,9 +388,17 @@ def process_files(
             outputs_namespace.OUTPUT_SET.append(
                 [file_name] + outputs_namespace.empty_resp
             )
-            if (
-                not collect_results
-                and check_and_move(ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path)
+            if collect_results:
+                processing_results.append(
+                    {
+                        "error_code": "markers_not_found",
+                        "file_id": file_name,
+                    }
+                )
+            elif check_and_move(
+                ERROR_CODES.NO_MARKER_ERR,
+                file_path,
+                new_file_path,
             ):
                 err_line = [
                     file_name,
@@ -501,13 +509,17 @@ def process_files(
             # multi_marked file
             logger.info(f"[{files_counter}] Found multi-marked file: '{file_id}'")
             new_file_path = outputs_namespace.paths.multi_marked_dir.joinpath(file_name)
-            if (
-                not collect_results
-                and check_and_move(
-                    ERROR_CODES.MULTI_BUBBLE_WARN,
-                    file_path,
-                    new_file_path,
+            if collect_results:
+                processing_results.append(
+                    {
+                        "error_code": "multiple_marks",
+                        "file_id": file_name,
+                    }
                 )
+            elif check_and_move(
+                ERROR_CODES.MULTI_BUBBLE_WARN,
+                file_path,
+                new_file_path,
             ):
                 mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
                 pd.DataFrame(mm_line, dtype=str).T.to_csv(

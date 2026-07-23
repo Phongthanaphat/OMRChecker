@@ -36,6 +36,7 @@ class ImageInstanceOps:
         tuning_config = self.tuning_config
         timings_ms = {}
         started_at = perf_counter()
+        marker_fallback_image = None
         # resize to conform to template
         in_omr = ImageUtils.resize_util(
             in_omr,
@@ -46,11 +47,37 @@ class ImageInstanceOps:
 
         # run pre_processors in sequence
         for pre_processor in template.pre_processors:
+            processor_name = pre_processor.__class__.__name__
+            if processor_name == "FeatureBasedAlignment":
+                marker_fallback_image = in_omr.copy()
+
             processor_started_at = perf_counter()
-            in_omr = pre_processor.apply_filter(in_omr, file_path)
-            timings_ms[pre_processor.__class__.__name__] = round(
+            processed_image = pre_processor.apply_filter(in_omr, file_path)
+            timings_ms[processor_name] = round(
                 (perf_counter() - processor_started_at) * 1000, 2
             )
+
+            if (
+                processed_image is None
+                and processor_name == "CropOnMarkers"
+                and marker_fallback_image is not None
+            ):
+                fallback_started_at = perf_counter()
+                processed_image = pre_processor.apply_filter(
+                    marker_fallback_image.copy(),
+                    file_path,
+                )
+                timings_ms["CropOnMarkersFallback"] = round(
+                    (perf_counter() - fallback_started_at) * 1000,
+                    2,
+                )
+                if processed_image is not None:
+                    logger.info(
+                        "Marker detection recovered by retrying the image before "
+                        "feature-based alignment."
+                    )
+
+            in_omr = processed_image
             if in_omr is None:
                 break
         timings_ms["total"] = round((perf_counter() - started_at) * 1000, 2)

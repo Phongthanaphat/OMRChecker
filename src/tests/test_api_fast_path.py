@@ -4,6 +4,8 @@ import shutil
 from io import BytesIO
 
 import pandas as pd
+import pytest
+from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 os.environ.setdefault("OMR_ALLOW_NO_AUTH", "1")
@@ -53,6 +55,45 @@ def test_check_endpoint_uses_in_memory_result(monkeypatch):
         "q1": "A",
         "q2": "",
     }
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_detail"),
+    [
+        ("markers_not_found", "marker(s) not found"),
+        ("multiple_marks", "Multiple marks were detected"),
+    ],
+)
+def test_check_endpoint_preserves_processing_error_reason(
+    monkeypatch,
+    error_code,
+    expected_detail,
+):
+    monkeypatch.setattr(
+        api_main,
+        "entry_point",
+        lambda _work_dir, _args: {
+            "error_code": error_code,
+            "file_id": "upload.jpg",
+        },
+    )
+    upload = UploadFile(
+        filename="sheet.jpg",
+        file=BytesIO(b"fake-image"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_main.check_omr(
+            image=upload,
+            template_id="20q",
+            evaluation=None,
+            school_id="1",
+            exam_id="45",
+            require_roll=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert expected_detail in exc_info.value.detail
 
 
 def test_api_fast_path_matches_csv_result(tmp_path, mocker):

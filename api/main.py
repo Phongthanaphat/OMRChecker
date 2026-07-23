@@ -744,6 +744,26 @@ def check_omr(
             raise HTTPException(status_code=400, detail=str(e)) from e
         mark_timing("entry_point")
 
+        if isinstance(entry_result, dict):
+            processing_error = entry_result.get("error_code")
+            if processing_error == "markers_not_found":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Not a valid OMR sheet: marker(s) not found in one or more corners. "
+                        "All four corner markers must be visible. Please upload a clear OMR answer sheet."
+                    ),
+                )
+            if processing_error == "multiple_marks":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Multiple marks were detected in one or more fields. "
+                        "Please erase duplicate marks clearly and rescan the sheet. "
+                        "ตรวจพบการฝนมากกว่าหนึ่งช่องในบางตำแหน่ง กรุณาลบช่องที่ฝนซ้ำให้ชัดเจนแล้วสแกนใหม่"
+                    ),
+                )
+
         row = None
         score = None
         responses = None
