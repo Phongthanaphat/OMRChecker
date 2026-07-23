@@ -311,11 +311,11 @@ class ImageInstanceOps:
                     #   "origin:", field_block.origin,'\n')
                 # print("End Alignment")
 
-            roll_grid_offsets = {}
+            roll_grid_centers = {}
             for field_block in template.field_blocks:
                 if field_block.name != "Roll":
                     continue
-                roll_grid_offsets[id(field_block)] = self.find_roll_grid_offset(
+                roll_grid_centers[id(field_block)] = self.find_roll_grid_centers(
                     img,
                     field_block,
                     base_shift_x=field_block.shift,
@@ -340,16 +340,22 @@ class ImageInstanceOps:
             total_q_strip_no = 0
             for field_block in template.field_blocks:
                 box_w, box_h = field_block.bubble_dimensions
-                roll_shift_x, roll_shift_y = roll_grid_offsets.get(
-                    id(field_block), (0, 0)
-                )
+                block_roll_centers = roll_grid_centers.get(id(field_block))
                 q_std_vals = []
                 for field_block_bubbles in field_block.traverse_bubbles:
                     q_strip_vals = []
                     for pt in field_block_bubbles:
-                        # shifted
-                        x = pt.x + field_block.shift + roll_shift_x
-                        y = pt.y + roll_shift_y
+                        fitted_center = (
+                            block_roll_centers.get(id(pt))
+                            if block_roll_centers
+                            else None
+                        )
+                        if fitted_center is not None:
+                            x = int(round(fitted_center[0] - box_w / 2))
+                            y = int(round(fitted_center[1] - box_h / 2))
+                        else:
+                            x = pt.x + field_block.shift
+                            y = pt.y
                         rect = [y, y + box_h, x, x + box_w]
                         q_strip_vals.append(
                             cv2.mean(img[rect[0] : rect[1], rect[2] : rect[3]])[0]
@@ -396,10 +402,8 @@ class ImageInstanceOps:
             for field_block in template.field_blocks:
                 block_q_strip_no = 1
                 box_w, box_h = field_block.bubble_dimensions
-                roll_shift_x, roll_shift_y = roll_grid_offsets.get(
-                    id(field_block), (0, 0)
-                )
-                shift = field_block.shift + roll_shift_x
+                block_roll_centers = roll_grid_centers.get(id(field_block))
+                shift = field_block.shift
                 is_roll_block = field_block.name == "Roll"
                 s, d = field_block.origin, field_block.dimensions
                 key = field_block.name[:3]
@@ -443,7 +447,7 @@ class ImageInstanceOps:
                             detected_bubbles.append(bubble)
                             x, y, field_value = (
                                 bubble.x + shift,
-                                bubble.y + roll_shift_y,
+                                bubble.y,
                                 bubble.field_value,
                             )
                             # When evaluation: skip A/B/C/D draw; we draw green/red later
@@ -475,7 +479,7 @@ class ImageInstanceOps:
                             # When evaluation: don't draw gray square on any empty bubble
                             if evaluation_config is None and not is_roll_block:
                                 x_unmarked = bubble.x + shift
-                                y_unmarked = bubble.y + roll_shift_y
+                                y_unmarked = bubble.y
                                 cv2.rectangle(
                                     final_marked,
                                     (int(x_unmarked + box_w / 10), int(y_unmarked + box_h / 10)),
@@ -487,19 +491,30 @@ class ImageInstanceOps:
                                     -1,
                                 )
 
-                    fallback_bubble = self.detect_int_bubble_by_inner_darkness(
-                        img,
-                        field_block_bubbles,
-                        box_w,
-                        box_h,
-                        shift,
-                        detected_bubbles,
-                        shift_y=roll_shift_y,
-                    )
+                    fallback_bubble = None
+                    if not is_roll_block or block_roll_centers:
+                        fallback_bubble = self.detect_int_bubble_by_inner_darkness(
+                            img,
+                            field_block_bubbles,
+                            box_w,
+                            box_h,
+                            shift,
+                            detected_bubbles,
+                            bubble_centers=block_roll_centers,
+                        )
                     if fallback_bubble is not None:
                         detected_bubbles.append(fallback_bubble)
-                        x = fallback_bubble.x + shift
-                        y = fallback_bubble.y + roll_shift_y
+                        fitted_center = (
+                            block_roll_centers.get(id(fallback_bubble))
+                            if block_roll_centers
+                            else None
+                        )
+                        if fitted_center is not None:
+                            x = int(round(fitted_center[0] - box_w / 2))
+                            y = int(round(fitted_center[1] - box_h / 2))
+                        else:
+                            x = fallback_bubble.x + shift
+                            y = fallback_bubble.y
                         if evaluation_config is None:
                             cv2.rectangle(
                                 final_marked,
@@ -665,80 +680,350 @@ class ImageInstanceOps:
             self.reset_all_save_img()
 
     @staticmethod
-    def find_roll_grid_offset(img, field_block, base_shift_x=0, max_offset=10):
-        """Find one small translation for the whole printed Roll grid.
-
-        The median ring response across all 50 circles ignores the five filled
-        circles and prevents each digit column from drifting independently.
-        """
-        box_w, box_h = map(int, field_block.bubble_dimensions)
-        yy, xx = np.ogrid[:box_h, :box_w]
-        center_x = (box_w - 1) / 2
-        center_y = (box_h - 1) / 2
-        radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
-        min_side = min(box_w, box_h)
-        ring_mask = (radius >= min_side * 0.34) & (radius <= min_side * 0.47)
-        ring_kernel = ring_mask.astype(np.float32)
-        ring_kernel /= float(np.sum(ring_kernel))
-        ring_response = cv2.filter2D(
-            (255 - img).astype(np.float32),
-            cv2.CV_32F,
-            ring_kernel,
-            borderType=cv2.BORDER_REPLICATE,
+    def _nearest_roll_grid_candidates(predicted, candidates):
+        distances = np.linalg.norm(
+            predicted[:, None, :] - candidates[None, :, :],
+            axis=2,
         )
-        rows, cols = img.shape[:2]
-        centers = np.array(
-            [
-                (
-                    int(round(bubble.x + base_shift_x + center_x)),
-                    int(round(bubble.y + center_y)),
-                )
-                for strip in field_block.traverse_bubbles
-                for bubble in strip
-            ],
-            dtype=np.int32,
+        candidate_indexes = np.argmin(distances, axis=1)
+        return (
+            distances[np.arange(len(predicted)), candidate_indexes],
+            candidate_indexes,
         )
 
-        def grid_score(offset_x, offset_y):
-            sample_x = centers[:, 0] + offset_x
-            sample_y = centers[:, 1] + offset_y
+    @staticmethod
+    def _dominant_roll_grid_step(candidates, expected_gap, direction):
+        deltas = (
+            candidates[None, :, :] - candidates[:, None, :]
+        ).reshape(-1, 2)
+        if direction == "horizontal":
             valid = (
-                (sample_x >= 0)
-                & (sample_y >= 0)
-                & (sample_x < cols)
-                & (sample_y < rows)
+                (deltas[:, 0] > expected_gap * 0.60)
+                & (deltas[:, 0] < expected_gap * 1.45)
+                & (np.abs(deltas[:, 1]) < expected_gap * 0.50)
             )
-            if int(np.count_nonzero(valid)) < 20:
-                return float("-inf")
-            return float(
-                np.median(ring_response[sample_y[valid], sample_x[valid]])
+        else:
+            valid = (
+                (deltas[:, 1] > expected_gap * 0.60)
+                & (deltas[:, 1] < expected_gap * 1.45)
+                & (np.abs(deltas[:, 0]) < expected_gap * 0.50)
             )
 
-        base_score = grid_score(0, 0)
-        best_score = base_score
-        best_offset = (0, 0)
-        candidates = [
-            (dx, dy)
-            for dy in range(-max_offset, max_offset + 1)
-            for dx in range(-max_offset, max_offset + 1)
-        ]
-        candidates.sort(key=lambda value: abs(value[0]) + abs(value[1]))
-        for offset_x, offset_y in candidates:
-            score = grid_score(offset_x, offset_y)
-            if score > best_score:
-                best_score = score
-                best_offset = (offset_x, offset_y)
+        possible_steps = deltas[valid]
+        if len(possible_steps) == 0:
+            return None
 
-        improvement = best_score - base_score
-        applied = best_score >= 7 and improvement >= 0.75
-        selected_offset = best_offset if applied else (0, 0)
-        logger.info(
-            "[OMR Roll grid] "
-            f"dx={selected_offset[0]} dy={selected_offset[1]} "
-            f"base_score={base_score:.2f} best_score={best_score:.2f} "
-            f"improvement={improvement:.2f} applied={applied}"
+        bin_size = 3.0
+        binned_steps = np.rint(possible_steps / bin_size).astype(np.int16)
+        unique_steps, counts = np.unique(
+            binned_steps,
+            axis=0,
+            return_counts=True,
         )
-        return selected_offset
+        peak_indexes = np.argsort(counts)[::-1][:12]
+        supported_steps = []
+        for peak_index in peak_indexes:
+            peak = unique_steps[peak_index].astype(np.float32) * bin_size
+            near_peak = possible_steps[
+                np.linalg.norm(possible_steps - peak, axis=1) < 7
+            ]
+            if len(near_peak) >= 3:
+                supported_steps.append(
+                    (
+                        len(near_peak),
+                        int(counts[peak_index]),
+                        np.median(near_peak, axis=0).astype(np.float32),
+                    )
+                )
+        if not supported_steps:
+            return None
+        supported_steps.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return supported_steps[0][2]
+
+    @classmethod
+    def find_roll_grid_centers(cls, img, field_block, base_shift_x=0):
+        """Locate the printed 5x10 Roll circles and fit one local affine grid.
+
+        Marker rectification aligns the page corners, but a handheld photo can
+        still leave local perspective around the student-code area. Reading from
+        detected circle centers avoids guessing one translation for the whole grid.
+        """
+        started_at = perf_counter()
+        bubble_columns = list(field_block.traverse_bubbles)
+        if (
+            len(bubble_columns) < 2
+            or any(len(column) != len(bubble_columns[0]) for column in bubble_columns)
+            or len(bubble_columns[0]) < 2
+        ):
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                "reason=unsupported_grid_shape"
+            )
+            return None
+
+        box_w, box_h = map(float, field_block.bubble_dimensions)
+        nominal_centers = np.array(
+            [
+                [
+                    (
+                        bubble.x + base_shift_x + box_w / 2,
+                        bubble.y + box_h / 2,
+                    )
+                    for bubble in column
+                ]
+                for column in bubble_columns
+            ],
+            dtype=np.float32,
+        )
+        horizontal_gap = float(
+            np.median(
+                nominal_centers[1:, :, 0] - nominal_centers[:-1, :, 0]
+            )
+        )
+        vertical_gap = float(
+            np.median(
+                nominal_centers[:, 1:, 1] - nominal_centers[:, :-1, 1]
+            )
+        )
+        min_gap = min(horizontal_gap, vertical_gap)
+
+        rows, cols = img.shape[:2]
+        padding = int(round(max(box_w, box_h) * 4))
+        flat_nominal_centers = nominal_centers.reshape(-1, 2)
+        left = max(0, int(np.floor(np.min(flat_nominal_centers[:, 0]))) - padding)
+        top = max(0, int(np.floor(np.min(flat_nominal_centers[:, 1]))) - padding)
+        right = min(
+            cols,
+            int(np.ceil(np.max(flat_nominal_centers[:, 0]))) + padding,
+        )
+        bottom = min(
+            rows,
+            int(np.ceil(np.max(flat_nominal_centers[:, 1]))) + padding,
+        )
+        roi = img[top:bottom, left:right]
+        if roi.size == 0:
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False reason=empty_roi"
+            )
+            return None
+
+        locally_equalized = CLAHE_HELPER.apply(roi)
+        blurred = cv2.GaussianBlur(locally_equalized, (5, 5), 1.2)
+        circles = cv2.HoughCircles(
+            blurred,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=max(12, int(round(min_gap * 0.52))),
+            param1=110,
+            param2=max(14, int(round(min(box_w, box_h) * 0.56))),
+            minRadius=max(5, int(round(min(box_w, box_h) * 0.30))),
+            maxRadius=max(8, int(round(min(box_w, box_h) * 0.74))),
+        )
+        expected_count = len(bubble_columns) * len(bubble_columns[0])
+        if circles is None:
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                "reason=too_few_circles candidates=0 "
+                f"expected={expected_count}"
+            )
+            return None
+
+        candidates = circles[0, :, :2].astype(np.float32)
+        candidates += np.array([left, top], dtype=np.float32)
+        candidate_margin = max(box_w, box_h)
+        plausible = (
+            (
+                candidates[:, 0]
+                > np.min(flat_nominal_centers[:, 0]) - candidate_margin * 1.6
+            )
+            & (
+                candidates[:, 0]
+                < np.max(flat_nominal_centers[:, 0]) + candidate_margin * 3.8
+            )
+            & (
+                candidates[:, 1]
+                > np.min(flat_nominal_centers[:, 1]) - candidate_margin * 1.6
+            )
+            & (
+                candidates[:, 1]
+                < np.max(flat_nominal_centers[:, 1]) + candidate_margin * 2.8
+            )
+        )
+        candidates = candidates[plausible]
+        if len(candidates) < int(expected_count * 0.70):
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                f"reason=too_few_circles candidates={len(candidates)} "
+                f"expected={expected_count}"
+            )
+            return None
+        if len(candidates) > int(expected_count * 2.50):
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                f"reason=too_many_circles candidates={len(candidates)} "
+                f"expected={expected_count}"
+            )
+            return None
+
+        horizontal_step = cls._dominant_roll_grid_step(
+            candidates,
+            horizontal_gap,
+            "horizontal",
+        )
+        vertical_step = cls._dominant_roll_grid_step(
+            candidates,
+            vertical_gap,
+            "vertical",
+        )
+        if horizontal_step is None or vertical_step is None:
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                "reason=grid_step_not_found"
+            )
+            return None
+
+        determinant = abs(
+            horizontal_step[0] * vertical_step[1]
+            - horizontal_step[1] * vertical_step[0]
+        )
+        if determinant < horizontal_gap * vertical_gap * 0.40:
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                "reason=invalid_grid_geometry"
+            )
+            return None
+
+        column_count = len(bubble_columns)
+        row_count = len(bubble_columns[0])
+        logical_points = np.array(
+            [
+                (column, row, 1)
+                for row in range(row_count)
+                for column in range(column_count)
+            ],
+            dtype=np.float32,
+        )
+        origin_hypotheses = np.array(
+            [
+                candidate - column * horizontal_step - row * vertical_step
+                for candidate in candidates
+                for row in range(row_count)
+                for column in range(column_count)
+            ],
+            dtype=np.float32,
+        )
+        origin_hypotheses = (
+            np.unique(
+                np.rint(origin_hypotheses / 3).astype(np.int32),
+                axis=0,
+            ).astype(np.float32)
+            * 3
+        )
+
+        match_radius = max(8.0, min_gap * 0.19)
+        best_score = float("-inf")
+        best_prediction = None
+        for start in range(0, len(origin_hypotheses), 256):
+            origins = origin_hypotheses[start : start + 256]
+            predictions = (
+                origins[:, None, :]
+                + logical_points[None, :, 0:1] * horizontal_step
+                + logical_points[None, :, 1:2] * vertical_step
+            )
+            distances = np.linalg.norm(
+                predictions[:, :, None, :] - candidates[None, None, :, :],
+                axis=3,
+            )
+            nearest_distances = np.min(distances, axis=2)
+            matched = nearest_distances < match_radius
+            scores = np.sum(matched, axis=1) - 0.02 * np.sum(
+                nearest_distances * matched,
+                axis=1,
+            )
+            best_index = int(np.argmax(scores))
+            if float(scores[best_index]) > best_score:
+                best_score = float(scores[best_index])
+                best_prediction = predictions[best_index]
+
+        if best_prediction is None:
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                "reason=no_grid_hypothesis"
+            )
+            return None
+
+        prediction = best_prediction
+        distances, candidate_indexes = cls._nearest_roll_grid_candidates(
+            prediction,
+            candidates,
+        )
+        matched = distances < match_radius
+        affine_coefficients = None
+        for _ in range(3):
+            if int(np.count_nonzero(matched)) < int(expected_count * 0.75):
+                break
+            affine_coefficients = np.linalg.lstsq(
+                logical_points[matched],
+                candidates[candidate_indexes[matched]],
+                rcond=None,
+            )[0]
+            prediction = logical_points @ affine_coefficients
+            distances, candidate_indexes = cls._nearest_roll_grid_candidates(
+                prediction,
+                candidates,
+            )
+            matched = distances < match_radius
+
+        matched_count = int(np.count_nonzero(matched))
+        unique_matches = len(np.unique(candidate_indexes[matched]))
+        required_matches = int(np.ceil(expected_count * 0.80))
+        matched_grid = matched.reshape(row_count, column_count)
+        edge_row_matches = (
+            int(np.count_nonzero(matched_grid[0])),
+            int(np.count_nonzero(matched_grid[-1])),
+        )
+        edge_column_matches = (
+            int(np.count_nonzero(matched_grid[:, 0])),
+            int(np.count_nonzero(matched_grid[:, -1])),
+        )
+        minimum_edge_row_matches = int(np.ceil(column_count * 0.80))
+        minimum_edge_column_matches = int(np.ceil(row_count * 0.60))
+        has_edge_coverage = (
+            min(edge_row_matches) >= minimum_edge_row_matches
+            and min(edge_column_matches) >= minimum_edge_column_matches
+        )
+        if (
+            affine_coefficients is None
+            or matched_count < required_matches
+            or unique_matches < required_matches
+            or not has_edge_coverage
+        ):
+            logger.warning(
+                "[OMR Roll grid] method=circle_grid applied=False "
+                f"reason=insufficient_grid_matches matched={matched_count} "
+                f"unique={unique_matches} expected={expected_count} "
+                f"edge_rows={edge_row_matches} edge_cols={edge_column_matches}"
+            )
+            return None
+
+        fitted_grid = prediction.reshape(row_count, column_count, 2)
+        centers_by_bubble = {
+            id(bubble_columns[column][row]): tuple(fitted_grid[row, column])
+            for column in range(column_count)
+            for row in range(row_count)
+        }
+        fit_error = float(np.median(distances[matched]))
+        elapsed_ms = (perf_counter() - started_at) * 1000
+        logger.info(
+            "[OMR Roll grid] method=circle_grid applied=True "
+            f"matched={matched_count}/{expected_count} candidates={len(candidates)} "
+            f"fit_error={fit_error:.2f} "
+            f"origin=({affine_coefficients[2, 0]:.1f},{affine_coefficients[2, 1]:.1f}) "
+            f"h=({affine_coefficients[0, 0]:.1f},{affine_coefficients[0, 1]:.1f}) "
+            f"v=({affine_coefficients[1, 0]:.1f},{affine_coefficients[1, 1]:.1f}) "
+            f"total_ms={elapsed_ms:.2f}"
+        )
+        return centers_by_bubble
 
     @staticmethod
     def detect_int_bubble_by_inner_darkness(
@@ -749,6 +1034,7 @@ class ImageInstanceOps:
         shift,
         detected_bubbles,
         shift_y=0,
+        bubble_centers=None,
     ):
         """Select an integer bubble using a circular, locally normalized fill score.
 
@@ -764,27 +1050,76 @@ class ImageInstanceOps:
 
         scores = []
         rows, cols = img.shape[:2]
-        box_w = int(box_w)
-        box_h = int(box_h)
-        yy, xx = np.ogrid[:box_h, :box_w]
-        center_x = (box_w - 1) / 2
-        center_y = (box_h - 1) / 2
-        radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
-        min_side = min(box_w, box_h)
-        inner_mask = radius <= min_side * 0.33
-        background_mask = radius >= min_side * 0.58
+        uses_fitted_grid = bool(bubble_centers)
+        if uses_fitted_grid:
+            fitted_points = np.array(
+                [
+                    bubble_centers[id(bubble)]
+                    for bubble in field_block_bubbles
+                    if id(bubble) in bubble_centers
+                ],
+                dtype=np.float32,
+            )
+            if len(fitted_points) < 2:
+                return None
+            grid_gap = float(
+                np.median(np.linalg.norm(np.diff(fitted_points, axis=0), axis=1))
+            )
+            sample_half = max(8, int(np.ceil(grid_gap * 0.46)))
+            yy, xx = np.ogrid[
+                -sample_half : sample_half + 1,
+                -sample_half : sample_half + 1,
+            ]
+            radius = np.sqrt(xx**2 + yy**2)
+            inner_mask = radius <= grid_gap * 0.14
+            background_mask = (radius >= grid_gap * 0.40) & (
+                radius <= grid_gap * 0.46
+            )
+        else:
+            box_w = int(box_w)
+            box_h = int(box_h)
+            yy, xx = np.ogrid[:box_h, :box_w]
+            center_x = (box_w - 1) / 2
+            center_y = (box_h - 1) / 2
+            radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+            min_side = min(box_w, box_h)
+            inner_mask = radius <= min_side * 0.33
+            background_mask = radius >= min_side * 0.58
+
         for bubble in field_block_bubbles:
-            x = int(round(bubble.x + shift))
-            y = int(round(bubble.y + shift_y))
-            if x < 0 or y < 0 or x + box_w > cols or y + box_h > rows:
-                continue
-            roi = img[y : y + box_h, x : x + box_w]
+            if uses_fitted_grid:
+                fitted_center = bubble_centers.get(id(bubble))
+                if fitted_center is None:
+                    continue
+                center_x, center_y = map(lambda value: int(round(value)), fitted_center)
+                if (
+                    center_x - sample_half < 0
+                    or center_y - sample_half < 0
+                    or center_x + sample_half >= cols
+                    or center_y + sample_half >= rows
+                ):
+                    continue
+                roi = img[
+                    center_y - sample_half : center_y + sample_half + 1,
+                    center_x - sample_half : center_x + sample_half + 1,
+                ]
+            else:
+                x = int(round(bubble.x + shift))
+                y = int(round(bubble.y + shift_y))
+                if x < 0 or y < 0 or x + box_w > cols or y + box_h > rows:
+                    continue
+                roi = img[y : y + box_h, x : x + box_w]
+
             inner = roi[inner_mask]
             background = roi[background_mask]
             if inner.size == 0 or background.size == 0:
                 continue
             inner_mean = float(np.mean(inner))
-            background_level = float(np.percentile(background, 75))
+            background_level = float(
+                np.median(background)
+                if uses_fitted_grid
+                else np.percentile(background, 75)
+            )
             local_contrast = background_level - inner_mean
             local_dark_ratio = float(np.mean(inner < background_level - 25))
             scores.append(
@@ -808,16 +1143,25 @@ class ImageInstanceOps:
         median_local_contrast = float(
             np.median([s["local_contrast"] for s in scores])
         )
-        local_accepted = (
-            best_local["local_contrast"] >= 18
-            and best_local["local_dark_ratio"] >= 0.14
-            and best_local["local_contrast"] - second_local_contrast >= 5
-            and best_local["local_contrast"] - median_local_contrast >= 8
-        )
+        if uses_fitted_grid:
+            local_accepted = (
+                best_local["local_contrast"] >= 22
+                and best_local["local_dark_ratio"] >= 0.14
+                and best_local["local_contrast"] - second_local_contrast >= 8
+                and best_local["local_contrast"] - median_local_contrast >= 12
+            )
+        else:
+            local_accepted = (
+                best_local["local_contrast"] >= 18
+                and best_local["local_dark_ratio"] >= 0.14
+                and best_local["local_contrast"] - second_local_contrast >= 5
+                and best_local["local_contrast"] - median_local_contrast >= 8
+            )
 
         logger.info(
             "[OMR Roll diagnostic] "
             f"slot={first.field_label} "
+            f"method={'circle_grid' if uses_fitted_grid else 'template_box'} "
             f"shift_x={shift} shift_y={shift_y} "
             f"best_value={best_local['bubble'].field_value} "
             f"best_inner_mean={best_local['inner_mean']:.2f} "

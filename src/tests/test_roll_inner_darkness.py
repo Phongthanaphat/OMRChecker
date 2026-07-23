@@ -99,56 +99,92 @@ def test_inner_darkness_fallback_does_not_guess_from_shadow_alone():
     assert detected is None
 
 
-def test_roll_grid_alignment_recovers_one_shared_translation():
-    row_levels = np.linspace(235, 190, 820, dtype=np.uint8)
-    image = np.repeat(row_levels[:, None], 440, axis=1)
+def test_circle_grid_alignment_recovers_affine_roll_grid():
+    image = np.full((1500, 900), 235, dtype=np.uint8)
     columns = []
-    expected_digits = (1, 2, 3, 8, 9)
+    expected_digits = (1, 2, 4, 3, 4)
+    actual_origin = np.array([300.0, 720.0])
+    horizontal_step = np.array([66.0, -7.0])
+    vertical_step = np.array([-4.0, 63.0])
+
     for column in range(5):
         bubbles = []
         for digit in range(10):
             bubble = SimpleNamespace(
-                x=30 + column * 76,
-                y=30 + digit * 72,
+                x=190 + column * 76,
+                y=620 + digit * 72.5,
                 field_label=f"roll{column + 1}",
                 field_type="QTYPE_INT",
                 field_value=str(digit),
             )
             bubbles.append(bubble)
-            center = (bubble.x + 22 - 5, bubble.y + 22 + 6)
-            cv2.circle(image, center, 18, 40, 2)
+            center = (
+                actual_origin
+                + column * horizontal_step
+                + digit * vertical_step
+            )
+            center = tuple(np.rint(center).astype(int))
+            cv2.circle(image, center, 21, 45, 2)
             if digit == expected_digits[column]:
-                cv2.circle(image, center, 12, 65, -1)
+                cv2.circle(image, center, 11, 55, -1)
         columns.append(bubbles)
 
     field_block = SimpleNamespace(
         bubble_dimensions=[45, 45],
         traverse_bubbles=columns,
     )
+    fitted_centers = ImageInstanceOps.find_roll_grid_centers(image, field_block)
 
-    offset = ImageInstanceOps.find_roll_grid_offset(
-        image,
-        field_block,
-        max_offset=10,
-    )
-
-    assert abs(offset[0] - (-5)) <= 1
-    assert abs(offset[1] - 6) <= 1
+    assert fitted_centers is not None
     detected_digits = []
-    for bubbles in columns:
+    for column, bubbles in enumerate(columns):
+        for digit, bubble in enumerate(bubbles):
+            expected_center = (
+                actual_origin
+                + column * horizontal_step
+                + digit * vertical_step
+            )
+            assert np.linalg.norm(
+                np.array(fitted_centers[id(bubble)]) - expected_center
+            ) < 4
+
         detected = ImageInstanceOps.detect_int_bubble_by_inner_darkness(
             image,
             bubbles,
             box_w=45,
             box_h=45,
-            shift=offset[0],
-            shift_y=offset[1],
+            shift=0,
             detected_bubbles=[],
+            bubble_centers=fitted_centers,
         )
         assert detected is not None
         detected_digits.append(int(detected.field_value))
 
     assert detected_digits == list(expected_digits)
+
+
+def test_circle_grid_alignment_rejects_image_without_roll_grid():
+    image = np.full((1500, 900), 235, dtype=np.uint8)
+    columns = []
+    for column in range(5):
+        columns.append(
+            [
+                SimpleNamespace(
+                    x=190 + column * 76,
+                    y=620 + digit * 72.5,
+                    field_label=f"roll{column + 1}",
+                    field_type="QTYPE_INT",
+                    field_value=str(digit),
+                )
+                for digit in range(10)
+            ]
+        )
+    field_block = SimpleNamespace(
+        bubble_dimensions=[45, 45],
+        traverse_bubbles=columns,
+    )
+
+    assert ImageInstanceOps.find_roll_grid_centers(image, field_block) is None
 
 
 def test_inner_darkness_does_not_guess_between_two_similar_marks():
