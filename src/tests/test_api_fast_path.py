@@ -16,6 +16,22 @@ from src.tests.test_samples.sample1.boilerplate import TEMPLATE_BOILERPLATE
 from src.tests.utils import setup_mocker_patches
 
 
+def test_check_endpoint_declares_template_id_as_multipart_form_field():
+    check_route = next(
+        route
+        for route in api_main.app.routes
+        if getattr(route, "path", None) == "/check"
+        and "POST" in getattr(route, "methods", set())
+    )
+
+    body_param_names = {param.name for param in check_route.dependant.body_params}
+    query_param_names = {param.name for param in check_route.dependant.query_params}
+
+    assert {"image", "template_id", "evaluate", "evaluation", "school_id", "exam_id", "require_roll"} <= body_param_names
+    assert "template_id" not in query_param_names
+    assert "evaluate" not in query_param_names
+
+
 def test_check_endpoint_uses_in_memory_result(monkeypatch):
     monkeypatch.setattr(
         api_main,

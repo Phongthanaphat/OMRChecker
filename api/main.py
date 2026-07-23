@@ -569,8 +569,14 @@ def list_templates():
 @app.post("/check")
 def check_omr(
     image: UploadFile = File(..., description="OMR sheet image (jpg/png)"),
-    template_id: str = DEFAULT_TEMPLATE_ID,
-    evaluate: bool = True,
+    template_id: str = Form(
+        DEFAULT_TEMPLATE_ID,
+        description="OMR template id (for example 20q, 30q, 40q, or 50q).",
+    ),
+    evaluate: bool = Form(
+        True,
+        description="Whether to evaluate responses when an evaluation config is available.",
+    ),
     evaluation: str | None = Form(None, description="Evaluation config as JSON (from Laravel). If provided, overrides template evaluation and enables scoring."),
     school_id: str | None = Form(
         None,
