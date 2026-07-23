@@ -52,7 +52,7 @@ def test_roll_warning_is_returned_for_short_student_code():
     assert warning is not None
     assert warning["code"] == "incomplete_roll"
     assert warning["field"] == "Roll"
-    assert warning["min_length"] == 4
+    assert warning["min_length"] == 2
     assert warning["max_length"] == 5
     assert warning["expected_length"] == 5
     assert warning["detected_length"] == 2
@@ -83,6 +83,42 @@ def test_overlong_roll_is_rejected_as_unreliable():
         assert "Unreliable Roll read" in exc.detail
     else:
         raise AssertionError("Expected HTTPException for overlong Roll")
+
+
+def test_blank_roll_is_rejected_as_unreliable():
+    row = pd.Series({"Roll": ""})
+
+    try:
+        _reject_unreliable_roll_if_configured(ROLL_TEMPLATE, row)
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "expected 2-5 digits" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException for blank Roll")
+
+
+def test_one_digit_roll_is_rejected_as_unreliable():
+    row = pd.Series({"Roll": "7"})
+
+    try:
+        _reject_unreliable_roll_if_configured(ROLL_TEMPLATE, row)
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "expected 2-5 digits" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException for one-digit Roll")
+
+
+def test_non_digit_roll_is_rejected_as_unreliable():
+    row = pd.Series({"Roll": "12AB"})
+
+    try:
+        _reject_unreliable_roll_if_configured(ROLL_TEMPLATE, row)
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "expected 2-5 digits" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException for non-digit Roll")
 
 
 def test_check_endpoint_returns_warning_instead_of_rejecting_short_roll(monkeypatch):
@@ -152,3 +188,72 @@ def test_check_endpoint_rejects_overlong_roll(monkeypatch):
         assert "Unreliable Roll read" in exc.detail
     else:
         raise AssertionError("Expected HTTPException for overlong Roll")
+
+
+def test_check_endpoint_rejects_blank_roll(monkeypatch):
+    monkeypatch.setattr(api_main, "entry_point", fake_entry_point_with_roll(""))
+    upload = UploadFile(
+        filename="sheet.jpg",
+        file=BytesIO(b"fake-image"),
+    )
+
+    try:
+        api_main.check_omr(
+            image=upload,
+            template_id="20q",
+            evaluation=None,
+            school_id=None,
+            exam_id="45",
+            require_roll=True,
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "expected 2-5 digits" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException for blank Roll")
+
+
+def test_check_endpoint_rejects_one_digit_roll(monkeypatch):
+    monkeypatch.setattr(api_main, "entry_point", fake_entry_point_with_roll("7"))
+    upload = UploadFile(
+        filename="sheet.jpg",
+        file=BytesIO(b"fake-image"),
+    )
+
+    try:
+        api_main.check_omr(
+            image=upload,
+            template_id="20q",
+            evaluation=None,
+            school_id=None,
+            exam_id="45",
+            require_roll=True,
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "expected 2-5 digits" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException for one-digit Roll")
+
+
+def test_check_endpoint_rejects_non_digit_roll(monkeypatch):
+    monkeypatch.setattr(api_main, "entry_point", fake_entry_point_with_roll("12AB"))
+    upload = UploadFile(
+        filename="sheet.jpg",
+        file=BytesIO(b"fake-image"),
+    )
+
+    try:
+        api_main.check_omr(
+            image=upload,
+            template_id="20q",
+            evaluation=None,
+            school_id=None,
+            exam_id="45",
+            require_roll=True,
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "expected 2-5 digits" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException for non-digit Roll")

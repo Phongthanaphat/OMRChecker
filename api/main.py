@@ -298,8 +298,8 @@ UNKNOWN_SCHOOL_ID = "_unknown"
 CHECKED_MAX_SIDE = 1600
 CHECKED_TARGET_BYTES = 900 * 1024  # target under ~1MB if possible
 
-# When template defines customLabels.Roll, flag implausible reads (bad photo / alignment).
-ROLL_VALIDATION_MIN_LEN = 4
+# When template defines customLabels.Roll, reject implausible reads and warn on incomplete-but-usable reads.
+ROLL_VALIDATION_MIN_LEN = 2
 
 
 def _roll_slot_count(template_json: dict) -> int | None:
@@ -394,31 +394,23 @@ def _persist_checked_image_optimized(checked_src: Path, persistent_dest: Path) -
 
 
 def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | None:
-    """Return a warning when Roll is configured but the OMR-read value is implausible.
-
-    N = expanded roll slot count (e.g. 5 for roll1..roll5). This is intentionally non-fatal:
-    Laravel can save the scan as unbound/pending and let a teacher correct the student code.
-    """
+    """Return a warning when Roll is usable for scoring but not complete enough to bind."""
     max_slots = _roll_slot_count(template_json)
     if max_slots is None:
         return None
     roll = str(row.get("Roll", "")).strip()
-    if (
-        roll
-        and roll.isdigit()
-        and len(roll) == max_slots
-    ):
+    if roll and roll.isdigit() and len(roll) == max_slots:
         return None
-    code = "incomplete_roll" if roll and roll.isdigit() and len(roll) < max_slots else "invalid_roll"
     return {
-        "code": code,
+        "code": "incomplete_roll",
         "severity": "warning",
         "field": "Roll",
         "message": (
-            f"Invalid Roll (student ID read from sheet): expected exactly {max_slots} "
-            "digits. The sheet was processed, but Laravel should keep it unbound until a teacher corrects the student code. "
-            f"รหัสนักเรียน (Roll) ควรเป็นตัวเลข {max_slots} หลัก "
-            "ระบบตรวจคะแนนให้แล้ว แต่ควรให้ครูแก้รหัสนักเรียนก่อนผูกคะแนนรายคน"
+            f"Incomplete Roll (student ID read from sheet): expected {max_slots} digits, "
+            f"but read {len(roll)}. The sheet was processed, but Laravel should keep it unbound "
+            "until a teacher corrects the student code. "
+            f"รหัสนักเรียน (Roll) ควรเป็นตัวเลข {max_slots} หลัก แต่อ่านได้ {len(roll)} หลัก "
+            "ระบบตรวจคะแนนให้แล้ว แต่ต้องให้ครูแก้รหัสนักเรียนก่อนผูกคะแนนรายคน"
         ),
         "min_length": ROLL_VALIDATION_MIN_LEN,
         "max_length": max_slots,
@@ -428,23 +420,23 @@ def _roll_warning_if_configured(template_json: dict, row: pd.Series) -> dict | N
 
 
 def _reject_unreliable_roll_if_configured(template_json: dict, row: pd.Series) -> None:
-    """Reject Roll reads that suggest the sheet is misaligned, not merely missing/incomplete."""
+    """Reject Roll reads outside the processable range: 2..N digits."""
     max_slots = _roll_slot_count(template_json)
     if max_slots is None:
         return
     roll = str(row.get("Roll", "")).strip()
-    if not roll:
+    if roll.isdigit() and ROLL_VALIDATION_MIN_LEN <= len(roll) <= max_slots:
         return
-    if roll.isdigit() and len(roll) <= max_slots:
-        return
+    reason = "blank" if not roll else f"{len(roll)} characters"
     raise HTTPException(
         status_code=400,
         detail=(
-            f"Unreliable Roll read: expected at most {max_slots} digits, got {len(roll)} characters. "
-            "This usually means the sheet is misaligned, blurred, cropped, or has multiple marks in the student-code area. "
+            f"Unreliable Roll read: expected {ROLL_VALIDATION_MIN_LEN}-{max_slots} digits, got {reason}. "
+            "This usually means the student-code area is blank, misaligned, blurred, cropped, or has multiple marks. "
             "The answer read may also be unreliable, so please retake or rescan the sheet. "
-            f"อ่านรหัสนักเรียนผิดปกติ: ควรมีไม่เกิน {max_slots} หลัก แต่อ่านได้ {len(roll)} ตัวอักษร "
-            "มักเกิดจากภาพเอียง เบลอ ครอปไม่ครบ หรือฝนช่องรหัสซ้อนหลายช่อง จึงไม่ควรบันทึกคะแนนจากภาพนี้"
+            f"อ่านรหัสนักเรียนผิดปกติ: ควรเป็นตัวเลข {ROLL_VALIDATION_MIN_LEN}-{max_slots} หลัก "
+            f"แต่ค่าที่อ่านได้คือ {reason} "
+            "มักเกิดจากไม่ได้ฝนรหัส ภาพเอียง เบลอ ครอปไม่ครบ หรือฝนช่องรหัสซ้อนหลายช่อง จึงควรสแกนใหม่"
         ),
     )
 
@@ -806,7 +798,7 @@ def check_omr(
         template_for_roll = json.loads(cached["template.json"].decode("utf-8"))
         warnings = []
         # โหมด anonymous (require_roll=false): ไม่บังคับ Roll — นักเรียนไม่ฝนรหัส ใบยังตรวจได้ปกติ
-        # โหมด student (require_roll=true): ไม่ reject เมื่อ Roll หาย/ไม่ครบ แต่ส่ง warning ให้ Laravel จัดเป็นงานรอแก้รหัส
+        # โหมด student (require_roll=true): รับเฉพาะเลข 2-5 หลัก; 2-4 หลักตรวจต่อพร้อม warning เพื่อให้ Laravel รอแก้รหัส
         if require_roll:
             _reject_unreliable_roll_if_configured(template_for_roll, row)
             roll_warning = _roll_warning_if_configured(template_for_roll, row)
