@@ -242,6 +242,16 @@ class ImageInstanceOps:
                     #   "origin:", field_block.origin,'\n')
                 # print("End Alignment")
 
+            roll_grid_offsets = {}
+            for field_block in template.field_blocks:
+                if field_block.name != "Roll":
+                    continue
+                roll_grid_offsets[id(field_block)] = self.find_roll_grid_offset(
+                    img,
+                    field_block,
+                    base_shift_x=field_block.shift,
+                )
+
             final_align = None
             if config.outputs.show_image_level >= 2:
                 initial_align = self.draw_template_layout(img, template, shifted=False)
@@ -261,12 +271,16 @@ class ImageInstanceOps:
             total_q_strip_no = 0
             for field_block in template.field_blocks:
                 box_w, box_h = field_block.bubble_dimensions
+                roll_shift_x, roll_shift_y = roll_grid_offsets.get(
+                    id(field_block), (0, 0)
+                )
                 q_std_vals = []
                 for field_block_bubbles in field_block.traverse_bubbles:
                     q_strip_vals = []
                     for pt in field_block_bubbles:
                         # shifted
-                        x, y = (pt.x + field_block.shift, pt.y)
+                        x = pt.x + field_block.shift + roll_shift_x
+                        y = pt.y + roll_shift_y
                         rect = [y, y + box_h, x, x + box_w]
                         q_strip_vals.append(
                             cv2.mean(img[rect[0] : rect[1], rect[2] : rect[3]])[0]
@@ -313,7 +327,11 @@ class ImageInstanceOps:
             for field_block in template.field_blocks:
                 block_q_strip_no = 1
                 box_w, box_h = field_block.bubble_dimensions
-                shift = field_block.shift
+                roll_shift_x, roll_shift_y = roll_grid_offsets.get(
+                    id(field_block), (0, 0)
+                )
+                shift = field_block.shift + roll_shift_x
+                is_roll_block = field_block.name == "Roll"
                 s, d = field_block.origin, field_block.dimensions
                 key = field_block.name[:3]
                 # cv2.rectangle(final_marked,(s[0]+shift,s[1]),(s[0]+shift+d[0],
@@ -348,14 +366,15 @@ class ImageInstanceOps:
                     detected_bubbles = []
                     for bubble in field_block_bubbles:
                         bubble_is_marked = (
-                            per_q_strip_threshold > all_q_vals[total_q_box_no]
+                            not is_roll_block
+                            and per_q_strip_threshold > all_q_vals[total_q_box_no]
                         )
                         total_q_box_no += 1
                         if bubble_is_marked:
                             detected_bubbles.append(bubble)
                             x, y, field_value = (
-                                bubble.x + field_block.shift,
-                                bubble.y,
+                                bubble.x + shift,
+                                bubble.y + roll_shift_y,
                                 bubble.field_value,
                             )
                             # When evaluation: skip A/B/C/D draw; we draw green/red later
@@ -385,9 +404,9 @@ class ImageInstanceOps:
                                 )
                         else:
                             # When evaluation: don't draw gray square on any empty bubble
-                            if evaluation_config is None:
-                                x_unmarked = bubble.x + field_block.shift
-                                y_unmarked = bubble.y
+                            if evaluation_config is None and not is_roll_block:
+                                x_unmarked = bubble.x + shift
+                                y_unmarked = bubble.y + roll_shift_y
                                 cv2.rectangle(
                                     final_marked,
                                     (int(x_unmarked + box_w / 10), int(y_unmarked + box_h / 10)),
@@ -406,10 +425,12 @@ class ImageInstanceOps:
                         box_h,
                         shift,
                         detected_bubbles,
+                        shift_y=roll_shift_y,
                     )
                     if fallback_bubble is not None:
                         detected_bubbles.append(fallback_bubble)
-                        x, y = fallback_bubble.x + field_block.shift, fallback_bubble.y
+                        x = fallback_bubble.x + shift
+                        y = fallback_bubble.y + roll_shift_y
                         if evaluation_config is None:
                             cv2.rectangle(
                                 final_marked,
@@ -575,13 +596,96 @@ class ImageInstanceOps:
             self.reset_all_save_img()
 
     @staticmethod
-    def detect_int_bubble_by_inner_darkness(
-        img, field_block_bubbles, box_w, box_h, shift, detected_bubbles
-    ):
-        """Recover faint integer bubbles by looking at the inner fill, not the whole ring box.
+    def find_roll_grid_offset(img, field_block, base_shift_x=0, max_offset=10):
+        """Find one small translation for the whole printed Roll grid.
 
-        Applies only when a QTYPE_INT strip has no detected bubble. This avoids changing MCQ
-        answer scoring while rescuing student-code digits where pencil marks are small/light.
+        The median ring response across all 50 circles ignores the five filled
+        circles and prevents each digit column from drifting independently.
+        """
+        box_w, box_h = map(int, field_block.bubble_dimensions)
+        yy, xx = np.ogrid[:box_h, :box_w]
+        center_x = (box_w - 1) / 2
+        center_y = (box_h - 1) / 2
+        radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+        min_side = min(box_w, box_h)
+        ring_mask = (radius >= min_side * 0.34) & (radius <= min_side * 0.47)
+        ring_kernel = ring_mask.astype(np.float32)
+        ring_kernel /= float(np.sum(ring_kernel))
+        ring_response = cv2.filter2D(
+            (255 - img).astype(np.float32),
+            cv2.CV_32F,
+            ring_kernel,
+            borderType=cv2.BORDER_REPLICATE,
+        )
+        rows, cols = img.shape[:2]
+        centers = np.array(
+            [
+                (
+                    int(round(bubble.x + base_shift_x + center_x)),
+                    int(round(bubble.y + center_y)),
+                )
+                for strip in field_block.traverse_bubbles
+                for bubble in strip
+            ],
+            dtype=np.int32,
+        )
+
+        def grid_score(offset_x, offset_y):
+            sample_x = centers[:, 0] + offset_x
+            sample_y = centers[:, 1] + offset_y
+            valid = (
+                (sample_x >= 0)
+                & (sample_y >= 0)
+                & (sample_x < cols)
+                & (sample_y < rows)
+            )
+            if int(np.count_nonzero(valid)) < 20:
+                return float("-inf")
+            return float(
+                np.median(ring_response[sample_y[valid], sample_x[valid]])
+            )
+
+        base_score = grid_score(0, 0)
+        best_score = base_score
+        best_offset = (0, 0)
+        candidates = [
+            (dx, dy)
+            for dy in range(-max_offset, max_offset + 1)
+            for dx in range(-max_offset, max_offset + 1)
+        ]
+        candidates.sort(key=lambda value: abs(value[0]) + abs(value[1]))
+        for offset_x, offset_y in candidates:
+            score = grid_score(offset_x, offset_y)
+            if score > best_score:
+                best_score = score
+                best_offset = (offset_x, offset_y)
+
+        improvement = best_score - base_score
+        applied = best_score >= 7 and improvement >= 0.75
+        selected_offset = best_offset if applied else (0, 0)
+        logger.info(
+            "[OMR Roll grid] "
+            f"dx={selected_offset[0]} dy={selected_offset[1]} "
+            f"base_score={base_score:.2f} best_score={best_score:.2f} "
+            f"improvement={improvement:.2f} applied={applied}"
+        )
+        return selected_offset
+
+    @staticmethod
+    def detect_int_bubble_by_inner_darkness(
+        img,
+        field_block_bubbles,
+        box_w,
+        box_h,
+        shift,
+        detected_bubbles,
+        shift_y=0,
+    ):
+        """Select an integer bubble using a circular, locally normalized fill score.
+
+        The sampled disk stays inside the printed circle. A candidate is accepted
+        only when it is dark enough relative to its own paper background and clearly
+        beats the runner-up.
         """
         if detected_bubbles or not field_block_bubbles:
             return None
@@ -591,44 +695,32 @@ class ImageInstanceOps:
 
         scores = []
         rows, cols = img.shape[:2]
-        mx = max(3, int(box_w * 0.24))
-        my = max(3, int(box_h * 0.24))
+        box_w = int(box_w)
+        box_h = int(box_h)
+        yy, xx = np.ogrid[:box_h, :box_w]
+        center_x = (box_w - 1) / 2
+        center_y = (box_h - 1) / 2
+        radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+        min_side = min(box_w, box_h)
+        inner_mask = radius <= min_side * 0.33
+        background_mask = radius >= min_side * 0.58
         for bubble in field_block_bubbles:
             x = int(round(bubble.x + shift))
-            y = int(round(bubble.y))
-            x1 = max(0, min(cols, x + mx))
-            x2 = max(0, min(cols, x + box_w - mx))
-            y1 = max(0, min(rows, y + my))
-            y2 = max(0, min(rows, y + box_h - my))
-            if x2 <= x1 or y2 <= y1:
+            y = int(round(bubble.y + shift_y))
+            if x < 0 or y < 0 or x + box_w > cols or y + box_h > rows:
                 continue
-            inner = img[y1:y2, x1:x2]
-            if inner.size == 0:
+            roi = img[y : y + box_h, x : x + box_w]
+            inner = roi[inner_mask]
+            background = roi[background_mask]
+            if inner.size == 0 or background.size == 0:
                 continue
             inner_mean = float(np.mean(inner))
-            dark_ratio = float(np.mean(inner < 155))
-            roi_x1 = max(0, min(cols, x))
-            roi_x2 = max(0, min(cols, x + box_w))
-            roi_y1 = max(0, min(rows, y))
-            roi_y2 = max(0, min(rows, y + box_h))
-            roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
-            corner_h = max(2, int(roi.shape[0] * 0.18))
-            corner_w = max(2, int(roi.shape[1] * 0.18))
-            corner_pixels = np.concatenate(
-                [
-                    roi[:corner_h, :corner_w].ravel(),
-                    roi[:corner_h, -corner_w:].ravel(),
-                    roi[-corner_h:, :corner_w].ravel(),
-                    roi[-corner_h:, -corner_w:].ravel(),
-                ]
-            )
-            background_level = float(np.percentile(corner_pixels, 75))
+            background_level = float(np.percentile(background, 75))
             local_contrast = background_level - inner_mean
             local_dark_ratio = float(np.mean(inner < background_level - 25))
             scores.append(
                 {
                     "inner_mean": inner_mean,
-                    "dark_ratio": dark_ratio,
                     "local_contrast": local_contrast,
                     "local_dark_ratio": local_dark_ratio,
                     "bubble": bubble,
@@ -637,20 +729,6 @@ class ImageInstanceOps:
 
         if len(scores) < 2:
             return None
-        raw_scores = sorted(scores, key=lambda item: item["inner_mean"])
-        best_raw = raw_scores[0]
-        best_mean = best_raw["inner_mean"]
-        best_dark_ratio = best_raw["dark_ratio"]
-        second_mean = raw_scores[1]["inner_mean"]
-        median_mean = float(np.median([s["inner_mean"] for s in scores]))
-        spread = float(np.std([s["inner_mean"] for s in scores]))
-        raw_accepted = (
-            best_dark_ratio >= 0.16
-            and median_mean - best_mean >= 16
-            and second_mean - best_mean >= 8
-            and spread >= 7
-        )
-
         local_scores = sorted(
             scores,
             key=lambda item: item["local_contrast"],
@@ -667,28 +745,22 @@ class ImageInstanceOps:
             and best_local["local_contrast"] - second_local_contrast >= 5
             and best_local["local_contrast"] - median_local_contrast >= 8
         )
-        accepted = raw_accepted or local_accepted
-        selected = best_raw if raw_accepted else best_local
 
         logger.info(
             "[OMR Roll diagnostic] "
             f"slot={first.field_label} "
-            f"shift={shift} "
-            f"best_inner_mean={best_mean:.2f} "
-            f"best_dark_ratio={best_dark_ratio:.3f} "
-            f"median_gap={median_mean - best_mean:.2f} "
-            f"second_gap={second_mean - best_mean:.2f} "
-            f"spread={spread:.2f} "
+            f"shift_x={shift} shift_y={shift_y} "
+            f"best_value={best_local['bubble'].field_value} "
+            f"best_inner_mean={best_local['inner_mean']:.2f} "
             f"local_contrast={best_local['local_contrast']:.2f} "
             f"local_dark_ratio={best_local['local_dark_ratio']:.3f} "
             f"local_second_gap={best_local['local_contrast'] - second_local_contrast:.2f} "
             f"local_median_gap={best_local['local_contrast'] - median_local_contrast:.2f} "
-            f"accepted_by={'raw' if raw_accepted else 'local' if local_accepted else 'none'} "
-            f"accepted={accepted}"
+            f"accepted={local_accepted}"
         )
 
-        if accepted:
-            return selected["bubble"]
+        if local_accepted:
+            return best_local["bubble"]
         return None
 
     @staticmethod

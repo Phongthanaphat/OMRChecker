@@ -32,6 +32,30 @@ def test_check_endpoint_declares_template_id_as_multipart_form_field():
     assert "evaluate" not in query_param_names
 
 
+def test_failed_debug_image_retention_is_opt_in_and_bounded(
+    monkeypatch,
+    tmp_path,
+):
+    source = tmp_path / "upload.jpg"
+    source.write_bytes(b"private-test-image")
+    debug_dir = tmp_path / "failed"
+    monkeypatch.setattr(api_main, "DEBUG_SAVE_FAILED_IMAGES", True)
+    monkeypatch.setattr(api_main, "DEBUG_FAILED_IMAGE_MAX", 2)
+    monkeypatch.setattr(api_main, "DEBUG_FAILED_IMAGE_DIR", debug_dir)
+
+    for request_id in ("request-1", "request-2", "request-3"):
+        retained = api_main._persist_failed_debug_image(
+            source,
+            request_id,
+            ".jpg",
+        )
+        assert retained is not None
+
+    retained_files = list(debug_dir.glob("*.jpg"))
+    assert len(retained_files) == 2
+    assert (debug_dir / "request-3.jpg").is_file()
+
+
 def test_check_endpoint_uses_in_memory_result(monkeypatch):
     monkeypatch.setattr(
         api_main,

@@ -67,6 +67,14 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+DEBUG_SAVE_FAILED_IMAGES = _env_flag("OMR_DEBUG_SAVE_FAILED_IMAGES", False)
+DEBUG_FAILED_IMAGE_MAX = min(
+    get_positive_int_env("OMR_DEBUG_FAILED_IMAGE_MAX", 20),
+    100,
+)
+DEBUG_FAILED_IMAGE_DIR = OUTPUTS_DIR / "debug" / "failed"
+
+
 def _current_rss_mb() -> float | None:
     """Return current RSS in MB when the platform exposes it cheaply."""
     status_path = Path("/proc/self/status")
@@ -135,6 +143,36 @@ def _image_dimensions_from_header(data: bytes, ext: str) -> tuple[int, int] | No
     if ext in {".jpg", ".jpeg"}:
         return _jpeg_dimensions(data)
     return None
+
+
+def _persist_failed_debug_image(
+    upload_path: Path | None,
+    request_id: str,
+    ext: str,
+) -> Path | None:
+    """Keep a bounded private sample of failed scans for reproducible diagnostics."""
+    if (
+        not DEBUG_SAVE_FAILED_IMAGES
+        or upload_path is None
+        or not upload_path.is_file()
+    ):
+        return None
+
+    try:
+        DEBUG_FAILED_IMAGE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination = DEBUG_FAILED_IMAGE_DIR / f"{request_id}{ext}"
+        shutil.copyfile(upload_path, destination)
+        files = sorted(
+            (path for path in DEBUG_FAILED_IMAGE_DIR.iterdir() if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for stale_path in files[DEBUG_FAILED_IMAGE_MAX:]:
+            stale_path.unlink(missing_ok=True)
+        return destination
+    except OSError as exc:
+        logger.warning(f"Unable to retain failed OMR debug image: {exc}")
+        return None
 
 
 # Fail fast: refuse to start with auth disabled unless explicitly opted in for local dev.
@@ -625,6 +663,7 @@ def check_omr(
     work_dir: Path | None = None
     out_dir: Path | None = None
     upload_bytes = 0
+    upload_path: Path | None = None
 
     def mark_timing(name: str) -> None:
         nonlocal timing_stage_started_at
@@ -920,6 +959,15 @@ def check_omr(
 
     except HTTPException as e:
         status_code = e.status_code
+        if e.status_code == 400:
+            retained_path = _persist_failed_debug_image(upload_path, request_id, ext)
+            if retained_path is not None:
+                print(
+                    "[OMR debug] "
+                    f"request_id={request_id} "
+                    f"saved_failed_image={retained_path.relative_to(PROJECT_ROOT)}",
+                    flush=True,
+                )
         raise
     except Exception:
         status_code = 500
